@@ -37,17 +37,14 @@ pub fn detect_repeated_patterns(sessions: &[EventSession]) -> Vec<PatternCandida
             summary
         );
         let safety_score = action_safety_score(session);
-        let entry =
-            counts
-                .entry(signature)
-                .or_insert((
-                    0,
-                    0,
-                    summary.clone(),
-                    proposal_text.clone(),
-                    session.end_ts,
-                    safety_score,
-                ));
+        let entry = counts.entry(signature).or_insert((
+            0,
+            0,
+            summary.clone(),
+            proposal_text.clone(),
+            session.end_ts,
+            safety_score,
+        ));
         entry.0 += 1;
         entry.1 += duration_ms;
         if session.end_ts > entry.4 {
@@ -112,11 +109,16 @@ fn usefulness_score(
     safety_score: f64,
 ) -> f64 {
     let repetition_score = (count as f64 / 5.0).clamp(0.0, 1.0);
-    let freshness_score =
-        freshness_score(latest_observed_at.signed_duration_since(last_seen_at).num_seconds());
+    let freshness_score = freshness_score(
+        latest_observed_at
+            .signed_duration_since(last_seen_at)
+            .num_seconds(),
+    );
     let duration_score = duration_score(avg_duration_ms);
-    let score =
-        (0.45 * repetition_score) + (0.3 * freshness_score) + (0.15 * duration_score) + (0.1 * safety_score);
+    let score = (0.45 * repetition_score)
+        + (0.3 * freshness_score)
+        + (0.15 * duration_score)
+        + (0.1 * safety_score);
     (score * 1000.0).round() / 1000.0
 }
 
@@ -242,7 +244,10 @@ mod tests {
             "CreateFile:invoice->RenameFile:invoice_reviewed->MoveFile:invoice_reviewed"
         );
         assert!(patterns[0].proposal_text.contains("invoice"));
-        assert_eq!(patterns[0].last_seen_at, Utc.with_ymd_and_hms(2026, 1, 15, 10, 0, 40).unwrap());
+        assert_eq!(
+            patterns[0].last_seen_at,
+            Utc.with_ymd_and_hms(2026, 1, 15, 10, 0, 40).unwrap()
+        );
         assert_eq!(patterns[0].safety_score, 1.0);
         assert!(patterns[0].usefulness_score > 0.7);
     }

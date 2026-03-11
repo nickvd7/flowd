@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 
 const DEFAULT_SESSION_INACTIVITY_SECS: i64 = 300;
 
+pub const AUTOMATION_STATUS_ACTIVE: &str = "active";
+pub const AUTOMATION_STATUS_DISABLED: &str = "disabled";
+pub const AUTOMATION_STATUS_FAILED: &str = "failed";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredSuggestion {
     pub suggestion_id: i64,
@@ -98,7 +102,10 @@ pub fn insert_raw_event(conn: &Connection, event: &RawEvent) -> rusqlite::Result
     )
 }
 
-fn insert_normalized_event_row(conn: &Connection, event: &NormalizedEvent) -> rusqlite::Result<usize> {
+fn insert_normalized_event_row(
+    conn: &Connection,
+    event: &NormalizedEvent,
+) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO normalized_events (ts, action_type, app, target, metadata_json, raw_event_id) VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
         params![
@@ -470,7 +477,13 @@ fn sync_suggestion_for_pattern(
         return Ok(());
     }
 
-    insert_suggestion(conn, pattern_id, proposal_text, created_at, usefulness_score)?;
+    insert_suggestion(
+        conn,
+        pattern_id,
+        proposal_text,
+        created_at,
+        usefulness_score,
+    )?;
     Ok(())
 }
 
@@ -492,15 +505,11 @@ fn mark_stale_patterns_and_suggestions(
         .join(", ");
 
     conn.execute(
-        &format!(
-            "UPDATE patterns SET is_active = 0 WHERE id NOT IN ({placeholders})"
-        ),
+        &format!("UPDATE patterns SET is_active = 0 WHERE id NOT IN ({placeholders})"),
         rusqlite::params_from_iter(active_pattern_ids.iter()),
     )?;
     conn.execute(
-        &format!(
-            "UPDATE patterns SET is_active = 1 WHERE id IN ({placeholders})"
-        ),
+        &format!("UPDATE patterns SET is_active = 1 WHERE id IN ({placeholders})"),
         rusqlite::params_from_iter(active_pattern_ids.iter()),
     )?;
     conn.execute(
@@ -633,15 +642,26 @@ pub fn insert_automation(
     conn: &Connection,
     suggestion_id: i64,
     spec_yaml: &str,
-    state: &str,
+    status: &str,
     summary: &str,
     accepted_at: &str,
 ) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO automations (suggestion_id, spec_yaml, state, summary, accepted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![suggestion_id, spec_yaml, state, summary, accepted_at],
+        params![suggestion_id, spec_yaml, status, summary, accepted_at],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+pub fn set_automation_status(
+    conn: &Connection,
+    automation_id: i64,
+    status: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE automations SET state = ?2 WHERE id = ?1",
+        params![automation_id, status],
+    )
 }
 
 pub fn list_automations(conn: &Connection) -> rusqlite::Result<Vec<StoredAutomation>> {
@@ -1048,9 +1068,11 @@ mod tests {
             )
             .unwrap();
         let is_active: i64 = conn
-            .query_row("SELECT is_active FROM patterns ORDER BY id ASC LIMIT 1", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT is_active FROM patterns ORDER BY id ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
 
         assert_eq!(freshness, "stale");
@@ -1087,7 +1109,7 @@ mod tests {
             &conn,
             suggestion.suggestion_id,
             "id: test\ntrigger: {}\nactions: []\n",
-            "approved",
+            AUTOMATION_STATUS_ACTIVE,
             &suggestion.proposal_text,
             "2026-01-15T10:00:00Z",
         )
@@ -1111,6 +1133,34 @@ mod tests {
         assert_eq!(suggestion_row.1, "current");
         assert_eq!(automation_count, 1);
         assert!(list_suggestions(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn automation_status_updates_are_persisted_and_queryable() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let automation_id = insert_automation(
+            &conn,
+            1,
+            "id: test\ntrigger: {}\nactions: []\n",
+            AUTOMATION_STATUS_ACTIVE,
+            "Test automation",
+            "2026-03-11T10:00:00Z",
+        )
+        .unwrap();
+
+        set_automation_status(&conn, automation_id, AUTOMATION_STATUS_DISABLED).unwrap();
+        let disabled = get_automation(&conn, automation_id).unwrap().unwrap();
+        assert_eq!(disabled.status, AUTOMATION_STATUS_DISABLED);
+
+        let listed = list_automations(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, AUTOMATION_STATUS_DISABLED);
+
+        set_automation_status(&conn, automation_id, AUTOMATION_STATUS_FAILED).unwrap();
+        let failed = get_automation(&conn, automation_id).unwrap().unwrap();
+        assert_eq!(failed.status, AUTOMATION_STATUS_FAILED);
     }
 
     #[test]

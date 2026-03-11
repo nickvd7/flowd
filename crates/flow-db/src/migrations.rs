@@ -59,7 +59,7 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
             id INTEGER PRIMARY KEY,
             suggestion_id INTEGER,
             spec_yaml TEXT NOT NULL,
-            state TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'active',
             summary TEXT,
             accepted_at TEXT
         );
@@ -77,12 +77,14 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
 
     ensure_normalized_events_raw_event_id_column(conn)?;
     ensure_automations_suggestion_id_column(conn)?;
+    ensure_automations_state_column(conn)?;
     ensure_automations_summary_column(conn)?;
     ensure_patterns_last_seen_at_column(conn)?;
     ensure_patterns_safety_score_column(conn)?;
     ensure_patterns_is_active_column(conn)?;
     ensure_suggestions_usefulness_score_column(conn)?;
     ensure_suggestions_freshness_column(conn)?;
+    normalize_automation_states(conn)?;
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_signature ON patterns(signature)",
         [],
@@ -123,6 +125,15 @@ fn ensure_automations_summary_column(conn: &Connection) -> rusqlite::Result<()> 
         "automations",
         "summary",
         "ALTER TABLE automations ADD COLUMN summary TEXT",
+    )
+}
+
+fn ensure_automations_state_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "automations",
+        "state",
+        "ALTER TABLE automations ADD COLUMN state TEXT NOT NULL DEFAULT 'active'",
     )
 }
 
@@ -169,6 +180,14 @@ fn ensure_suggestions_freshness_column(conn: &Connection) -> rusqlite::Result<()
         "freshness",
         "ALTER TABLE suggestions ADD COLUMN freshness TEXT NOT NULL DEFAULT 'current'",
     )
+}
+
+fn normalize_automation_states(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE automations SET state = 'active' WHERE state IS NULL OR TRIM(state) = '' OR state = 'approved'",
+        [],
+    )?;
+    Ok(())
 }
 
 fn ensure_column_exists(

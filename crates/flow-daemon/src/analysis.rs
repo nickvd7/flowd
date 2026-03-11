@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use flow_db::repo::{
-    insert_normalized_events_for_raw_events, list_pending_file_raw_events,
-};
+use flow_db::repo::{insert_normalized_events_for_raw_events, list_pending_file_raw_events};
 use flow_patterns::normalize::normalize;
 use rusqlite::Connection;
 

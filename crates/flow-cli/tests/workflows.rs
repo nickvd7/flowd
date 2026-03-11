@@ -96,8 +96,60 @@ fn approve_creates_automation_and_lists_it() {
     let stdout = String::from_utf8(automations.stdout).unwrap();
     assert!(stdout.contains("automation_id"));
     assert!(stdout.contains("suggestion_id"));
-    assert!(stdout.contains("approved"));
+    assert!(stdout.contains("active"));
     assert!(stdout.contains("Repeated invoice file workflow detected"));
+}
+
+#[test]
+fn disable_and_enable_update_automation_status_in_cli_output() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+    approve_suggestion(&db_path);
+
+    let disable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["disable", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(disable.status.success());
+    assert!(String::from_utf8(disable.stdout)
+        .unwrap()
+        .contains("Disabled automation 1"));
+
+    let disabled = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .arg("automations")
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(disabled.status.success());
+    assert!(String::from_utf8(disabled.stdout)
+        .unwrap()
+        .contains("disabled"));
+
+    let enable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["enable", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(enable.status.success());
+    assert!(String::from_utf8(enable.stdout)
+        .unwrap()
+        .contains("Enabled automation 1"));
+
+    let enabled = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .arg("automations")
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(enabled.status.success());
+    assert!(String::from_utf8(enabled.stdout)
+        .unwrap()
+        .contains("active"));
 }
 
 #[test]
@@ -172,6 +224,86 @@ fn run_executes_safe_file_automation_and_records_result() {
         )
         .unwrap();
     assert_eq!(run_count, 1);
+}
+
+#[test]
+fn run_blocks_disabled_automation_without_mutating_files() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+    approve_suggestion(&db_path);
+
+    std::fs::create_dir_all(temp_dir.path().join("inbox")).unwrap();
+    std::fs::write(temp_dir.path().join("inbox/invoice-1005.pdf"), "invoice").unwrap();
+
+    let disable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["disable", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(disable.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["run", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("automation 1 is disabled"));
+    assert!(temp_dir.path().join("inbox/invoice-1005.pdf").exists());
+    assert!(!temp_dir
+        .path()
+        .join("archive/invoice-1005-reviewed.pdf")
+        .exists());
+
+    let conn = Connection::open(&db_path).unwrap();
+    let run_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM automation_runs WHERE result = 'completed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_count, 0);
+}
+
+#[test]
+fn run_marks_automation_failed_when_execution_errors() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+    approve_suggestion(&db_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["run", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+
+    let automations = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .arg("automations")
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(automations.status.success());
+    assert!(String::from_utf8(automations.stdout)
+        .unwrap()
+        .contains("failed"));
+
+    let conn = Connection::open(&db_path).unwrap();
+    let failed_runs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM automation_runs WHERE result = 'failed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed_runs, 1);
 }
 
 fn seed_database(db_path: &Path) {

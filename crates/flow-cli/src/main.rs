@@ -5,7 +5,10 @@ use flow_db::{
     open_database,
     repo::{list_automations, list_patterns, list_recent_sessions, list_suggestions},
 };
-use flow_exec::{approve_suggestion, dry_run_automation, execute_automation};
+use flow_exec::{
+    approve_suggestion, disable_automation, dry_run_automation, enable_automation,
+    execute_automation,
+};
 use std::fmt::Display;
 
 #[derive(Debug, Parser)]
@@ -25,6 +28,8 @@ enum Commands {
     Tail,
     Approve { suggestion_id: i64 },
     Automations,
+    Disable { automation_id: i64 },
+    Enable { automation_id: i64 },
     Run { automation_id: i64 },
     DryRun { automation_id: i64 },
 }
@@ -48,6 +53,8 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Tail) => println!("tail: not implemented"),
         Some(Commands::Approve { suggestion_id }) => approve_automation_command(suggestion_id)?,
         Some(Commands::Automations) => render_automations()?,
+        Some(Commands::Disable { automation_id }) => disable_automation_command(automation_id)?,
+        Some(Commands::Enable { automation_id }) => enable_automation_command(automation_id)?,
         Some(Commands::Run { automation_id }) => run_automation_command(automation_id)?,
         Some(Commands::DryRun { automation_id }) => dry_run_automation_command(automation_id)?,
         None => println!("Use --help to see available commands."),
@@ -126,7 +133,14 @@ fn render_suggestions_table() -> anyhow::Result<()> {
         })
         .collect();
     print_table(
-        &["suggestion_id", "pattern", "runs", "score", "freshness", "description"],
+        &[
+            "suggestion_id",
+            "pattern",
+            "runs",
+            "score",
+            "freshness",
+            "description",
+        ],
         &rows,
     );
     Ok(())
@@ -191,6 +205,20 @@ fn render_automations() -> anyhow::Result<()> {
         &["automation_id", "suggestion_id", "status", "summary"],
         &rows,
     );
+    Ok(())
+}
+
+fn disable_automation_command(automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    disable_automation(&conn, automation_id).context("failed to disable automation")?;
+    println!("Disabled automation {automation_id}.");
+    Ok(())
+}
+
+fn enable_automation_command(automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    enable_automation(&conn, automation_id).context("failed to enable automation")?;
+    println!("Enabled automation {automation_id}.");
     Ok(())
 }
 

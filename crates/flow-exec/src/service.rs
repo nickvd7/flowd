@@ -4,7 +4,9 @@ use chrono::Utc;
 use flow_core::events::{ActionType, NormalizedEvent};
 use flow_db::repo::{
     get_automation, get_suggestion, insert_automation, insert_automation_run,
-    load_example_events_for_pattern, set_suggestion_status, AutomationRunRecord,
+    load_example_events_for_pattern, set_automation_status, set_suggestion_status,
+    AutomationRunRecord, AUTOMATION_STATUS_ACTIVE, AUTOMATION_STATUS_DISABLED,
+    AUTOMATION_STATUS_FAILED,
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
 use rusqlite::Connection;
@@ -48,7 +50,7 @@ pub fn approve_suggestion(conn: &mut Connection, suggestion_id: i64) -> Result<i
         &tx,
         suggestion_id,
         &spec_yaml,
-        "approved",
+        AUTOMATION_STATUS_ACTIVE,
         &suggestion.proposal_text,
         &accepted_at,
     )
@@ -68,17 +70,46 @@ pub fn dry_run_automation(conn: &Connection, automation_id: i64) -> Result<DryRu
 }
 
 pub fn execute_automation(conn: &Connection, automation_id: i64) -> Result<ExecutionReport> {
-    let spec = load_automation_spec(conn, automation_id)?;
-    let report = execute(&spec).context("failed to execute automation")?;
+    let stored = load_stored_automation(conn, automation_id)?;
+    ensure_automation_status(automation_id, &stored.status)?;
+    let spec = flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")?;
+    let report = match execute(&spec) {
+        Ok(report) => report,
+        Err(error) => {
+            set_automation_status(conn, automation_id, AUTOMATION_STATUS_FAILED)
+                .context("failed to update automation status")?;
+            store_failed_run_record(conn, automation_id, &error.to_string())?;
+            return Err(error).context("failed to execute automation");
+        }
+    };
     store_run_record(conn, automation_id, "completed", &report)?;
     Ok(report)
 }
 
 fn load_automation_spec(conn: &Connection, automation_id: i64) -> Result<AutomationSpec> {
-    let stored = get_automation(conn, automation_id)
-        .context("failed to read automation")?
-        .ok_or_else(|| anyhow!("automation {automation_id} not found"))?;
+    let stored = load_stored_automation(conn, automation_id)?;
     flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")
+}
+
+fn load_stored_automation(
+    conn: &Connection,
+    automation_id: i64,
+) -> Result<flow_db::repo::StoredAutomationSpec> {
+    get_automation(conn, automation_id)
+        .context("failed to read automation")?
+        .ok_or_else(|| anyhow!("automation {automation_id} not found"))
+}
+
+fn ensure_automation_status(automation_id: i64, status: &str) -> Result<()> {
+    if status == AUTOMATION_STATUS_ACTIVE {
+        return Ok(());
+    }
+
+    if status == AUTOMATION_STATUS_DISABLED {
+        bail!("automation {automation_id} is disabled");
+    }
+
+    bail!("automation {automation_id} is not active; current status is {status}");
 }
 
 fn store_run_record(
@@ -100,6 +131,41 @@ fn store_run_record(
         },
     )
     .context("failed to insert automation run")?;
+    Ok(())
+}
+
+fn store_failed_run_record(conn: &Connection, automation_id: i64, error: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let payload = serde_json::json!({ "error": error }).to_string();
+    insert_automation_run(
+        conn,
+        &AutomationRunRecord {
+            automation_id,
+            started_at: &now,
+            finished_at: &now,
+            result: AUTOMATION_STATUS_FAILED,
+            undo_payload_json: Some(&payload),
+        },
+    )
+    .context("failed to insert automation run")?;
+    Ok(())
+}
+
+pub fn disable_automation(conn: &Connection, automation_id: i64) -> Result<()> {
+    let stored = load_stored_automation(conn, automation_id)?;
+    if stored.status == AUTOMATION_STATUS_DISABLED {
+        return Ok(());
+    }
+
+    set_automation_status(conn, automation_id, AUTOMATION_STATUS_DISABLED)
+        .context("failed to update automation status")?;
+    Ok(())
+}
+
+pub fn enable_automation(conn: &Connection, automation_id: i64) -> Result<()> {
+    load_stored_automation(conn, automation_id)?;
+    set_automation_status(conn, automation_id, AUTOMATION_STATUS_ACTIVE)
+        .context("failed to update automation status")?;
     Ok(())
 }
 
