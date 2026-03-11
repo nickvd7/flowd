@@ -1,0 +1,54 @@
+# Codex project configuration for flowd
+
+model = "gpt-5.4"
+approval_mode = "on-request"
+
+[environment]
+language = "english"
+
+[project]
+name = "flowd"
+description = "Local-first workflow observer and automation suggester"
+
+[constraints]
+no_cloud_dependencies = true
+no_gui_frameworks = true
+terminal_first = true
+deterministic_behavior = true
+
+[commands]
+test = "cargo test"
+build = "cargo build"
+check = "cargo check"
+run_cli = "cargo run -p flow-cli --"
+run_daemon = "cargo run -p flow-daemon"
+
+[files]
+important = [
+  "Cargo.toml",
+  "crates/",
+  "docs/",
+  "PLAN.md",
+  "TASKS.md",
+  "PROMPTS_FOR_CODEX.md"
+]
+
+[style]
+comments_language = "english"
+documentation_language = "english"
+
+[rust]
+workspace = true
+edition = "2021"
+
+[policies]
+avoid_unnecessary_abstractions = true
+prefer_small_changes = true
+require_tests = true
+
+[forbidden_features]
+llm_integration = true
+browser_automation = true
+terminal_macro_engine = true
+destructive_file_actions = true
+

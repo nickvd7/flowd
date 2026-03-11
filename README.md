@@ -41,5 +41,8 @@ This ensures:
 cargo build
 cargo test
 cargo run -p flow-cli -- --help
+cargo run -p flow-cli -- suggest
 cargo run -p flow-daemon
 ```
+
+`flow-cli suggest` reads pending suggestions from SQLite. By default it uses `./flowd.db`; tests and local runs can override this with `FLOWD_DB_PATH=/path/to/flowd.db`.

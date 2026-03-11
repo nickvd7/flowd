@@ -1,0 +1,36 @@
+[
+  {
+    "ts": "2026-01-15T09:00:00Z",
+    "kind": "create",
+    "path": "/tmp/inbox/invoice-1001.pdf"
+  },
+  {
+    "ts": "2026-01-15T09:00:20Z",
+    "kind": "rename",
+    "path": "/tmp/inbox/invoice-1001-reviewed.pdf",
+    "from_path": "/tmp/inbox/invoice-1001.pdf"
+  },
+  {
+    "ts": "2026-01-15T09:00:40Z",
+    "kind": "move",
+    "path": "/tmp/archive/invoice-1001-reviewed.pdf",
+    "from_path": "/tmp/inbox/invoice-1001-reviewed.pdf"
+  },
+  {
+    "ts": "2026-01-15T10:00:00Z",
+    "kind": "create",
+    "path": "/tmp/inbox/invoice-1002.pdf"
+  },
+  {
+    "ts": "2026-01-15T10:00:20Z",
+    "kind": "rename",
+    "path": "/tmp/inbox/invoice-1002-reviewed.pdf",
+    "from_path": "/tmp/inbox/invoice-1002.pdf"
+  },
+  {
+    "ts": "2026-01-15T10:00:40Z",
+    "kind": "move",
+    "path": "/tmp/archive/invoice-1002-reviewed.pdf",
+    "from_path": "/tmp/inbox/invoice-1002-reviewed.pdf"
+  }
+]
