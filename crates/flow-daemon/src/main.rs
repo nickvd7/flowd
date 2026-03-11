@@ -3,7 +3,11 @@ use chrono::{DateTime, Duration, Utc};
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path, FileEvent};
 use flow_core::config::Config;
 use flow_core::events::RawEvent;
-use flow_db::{open_database as open_sqlite_database, repo::insert_raw_event};
+use flow_db::{
+    open_database as open_sqlite_database,
+    repo::{insert_normalized_event_for_raw_event, insert_raw_event, list_pending_file_raw_events},
+};
+use flow_patterns::normalize::normalize;
 use rusqlite::Connection;
 use std::{
     collections::VecDeque,
@@ -24,6 +28,8 @@ fn run() -> Result<()> {
     let config = load_config().context("failed to load daemon config")?;
     let observed_paths = resolve_observed_paths(&config)?;
     let conn = open_database(&config).context("failed to initialize daemon database")?;
+    normalize_pending_file_raw_events(&conn)
+        .context("failed to normalize pending raw file events")?;
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
     let mut deduper =
         RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
@@ -45,6 +51,8 @@ fn run() -> Result<()> {
                     let raw_event = file_event.into_raw_event();
                     persist_raw_event(&conn, &raw_event)
                         .context("failed to persist raw filesystem event")?;
+                    normalize_pending_file_raw_events(&conn)
+                        .context("failed to normalize raw filesystem events")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
             }
@@ -92,6 +100,21 @@ fn open_database(config: &Config) -> Result<Connection> {
 
 fn persist_raw_event(conn: &Connection, raw_event: &RawEvent) -> Result<()> {
     insert_raw_event(conn, raw_event).context("failed to insert raw event")?;
+    Ok(())
+}
+
+fn normalize_pending_file_raw_events(conn: &Connection) -> Result<()> {
+    for raw_event in
+        list_pending_file_raw_events(conn).context("failed to load pending raw file events")?
+    {
+        let Some(normalized_event) = normalize(&raw_event.event) else {
+            continue;
+        };
+
+        insert_normalized_event_for_raw_event(conn, raw_event.id, &normalized_event)
+            .context("failed to insert normalized event")?;
+    }
+
     Ok(())
 }
 
@@ -244,6 +267,46 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&payload_json).unwrap(),
             raw_event.payload
         );
+    }
+
+    #[test]
+    fn normalizes_persisted_file_events_into_sqlite() {
+        let dir = tempdir().unwrap();
+        let config = Config {
+            database_path: dir.path().join("flowd.db").display().to_string(),
+            ..Config::default()
+        };
+        let conn = open_database(&config).unwrap();
+        let raw_event = synthetic_file_event(
+            Utc::now(),
+            FileEventKind::Move,
+            dir.path()
+                .join("archive")
+                .join("report.txt")
+                .display()
+                .to_string(),
+            Some(dir.path().join("report.txt").display().to_string()),
+        );
+
+        persist_raw_event(&conn, &raw_event).unwrap();
+        normalize_pending_file_raw_events(&conn).unwrap();
+        normalize_pending_file_raw_events(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM normalized_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let raw_event_id: i64 = conn
+            .query_row(
+                "SELECT raw_event_id FROM normalized_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(raw_event_id, 1);
     }
 
     #[test]
