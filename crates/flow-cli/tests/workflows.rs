@@ -3,8 +3,9 @@ use flow_adapters::file_watcher::FileEvent;
 use flow_db::{
     migrations::run_migrations,
     repo::{
-        insert_normalized_event_record, list_automations, list_patterns, list_recent_sessions,
-        list_suggestions,
+        insert_normalized_event_record, insert_raw_event, list_automations, list_normalized_events,
+        list_patterns, list_pending_file_raw_events, list_recent_sessions, list_suggestions,
+        refresh_analysis_state,
     },
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
@@ -260,6 +261,111 @@ fn dry_run_previews_actions_and_records_a_run() {
         )
         .unwrap();
     assert_eq!(run_count, 1);
+}
+
+#[test]
+fn full_open_core_loop_runs_from_observed_events_through_undo() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database_from_observed_events(&db_path);
+
+    let conn = Connection::open(&db_path).unwrap();
+    assert_eq!(list_pending_file_raw_events(&conn).unwrap().len(), 0);
+    assert!(list_normalized_events(&conn).unwrap().len() >= 6);
+    assert_eq!(list_patterns(&conn).unwrap().len(), 1);
+    assert_eq!(list_suggestions(&conn).unwrap().len(), 1);
+
+    let suggest = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .arg("suggest")
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(suggest.status.success());
+    let suggest_stdout = String::from_utf8(suggest.stdout).unwrap();
+    assert!(suggest_stdout.contains("Repeated invoice file workflow detected"));
+
+    let approve = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["approve", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(approve.status.success());
+    assert!(String::from_utf8(approve.stdout)
+        .unwrap()
+        .contains("Approved suggestion 1 as automation 1"));
+
+    std::fs::create_dir_all(temp_dir.path().join("inbox")).unwrap();
+    std::fs::write(temp_dir.path().join("inbox/invoice-2001.pdf"), "invoice").unwrap();
+
+    let dry_run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["dry-run", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(dry_run.status.success());
+    let dry_run_stdout = String::from_utf8(dry_run.stdout).unwrap();
+    assert!(dry_run_stdout.contains("rename:"));
+    assert!(dry_run_stdout.contains("move:"));
+    assert!(temp_dir.path().join("inbox/invoice-2001.pdf").exists());
+    assert!(!temp_dir
+        .path()
+        .join("archive/invoice-2001-reviewed.pdf")
+        .exists());
+
+    let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["run", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    let run_stdout = String::from_utf8(run.stdout).unwrap();
+    assert!(run_stdout.contains("rename:"));
+    assert!(run_stdout.contains("move:"));
+    assert!(!temp_dir.path().join("inbox/invoice-2001.pdf").exists());
+    assert!(temp_dir
+        .path()
+        .join("archive/invoice-2001-reviewed.pdf")
+        .exists());
+
+    let runs = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .arg("runs")
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(runs.status.success());
+    let runs_stdout = String::from_utf8(runs.stdout).unwrap();
+    assert!(runs_stdout.contains("dry_run"));
+    assert!(runs_stdout.contains("completed"));
+
+    let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["undo", "2"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(undo.status.success());
+    let undo_stdout = String::from_utf8(undo.stdout).unwrap();
+    let move_index = undo_stdout.find("move:").unwrap();
+    let rename_index = undo_stdout.find("rename:").unwrap();
+    assert!(move_index < rename_index);
+    assert!(undo_stdout.contains("Undid automation run 2."));
+    assert!(temp_dir.path().join("inbox/invoice-2001.pdf").exists());
+    assert!(!temp_dir
+        .path()
+        .join("archive/invoice-2001-reviewed.pdf")
+        .exists());
+
+    let conn = Connection::open(&db_path).unwrap();
+    let run_results: Vec<String> = {
+        let mut statement = conn
+            .prepare("SELECT result FROM automation_runs ORDER BY id ASC")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(run_results, vec!["dry_run", "completed", "undone"]);
 }
 
 #[test]
@@ -586,7 +692,35 @@ fn run_marks_automation_failed_when_execution_errors() {
 fn seed_database(db_path: &Path) {
     let mut conn = Connection::open(db_path).unwrap();
     run_migrations(&conn).unwrap();
+    let raw_events: Vec<_> = fixture_file_events(db_path)
+        .into_iter()
+        .map(FileEvent::into_raw_event)
+        .collect();
+    let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
 
+    for event in &normalized {
+        insert_normalized_event_record(&mut conn, event).unwrap();
+    }
+}
+
+fn seed_database_from_observed_events(db_path: &Path) {
+    let mut conn = Connection::open(db_path).unwrap();
+    run_migrations(&conn).unwrap();
+
+    for event in fixture_file_events(db_path) {
+        insert_raw_event(&conn, &event.into_raw_event()).unwrap();
+    }
+
+    let pending = list_pending_file_raw_events(&conn).unwrap();
+    let normalized: Vec<_> = pending
+        .into_iter()
+        .filter_map(|record| normalize(&record.event).map(|event| (record.id, event)))
+        .collect();
+    flow_db::repo::insert_normalized_events_for_raw_events(&mut conn, &normalized).unwrap();
+    refresh_analysis_state(&mut conn, 300).unwrap();
+}
+
+fn fixture_file_events(db_path: &Path) -> Vec<FileEvent> {
     let fixture_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/invoice_file_events.json"
@@ -597,6 +731,7 @@ fn seed_database(db_path: &Path) {
     let archive = db_path.parent().unwrap().join("archive");
     let inbox_text = inbox.display().to_string();
     let archive_text = archive.display().to_string();
+
     for event in &mut file_events {
         event.path = event
             .path
@@ -608,15 +743,8 @@ fn seed_database(db_path: &Path) {
                 .replace("/tmp/archive", &archive_text)
         });
     }
-    let raw_events: Vec<_> = file_events
-        .into_iter()
-        .map(FileEvent::into_raw_event)
-        .collect();
-    let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
 
-    for event in &normalized {
-        insert_normalized_event_record(&mut conn, event).unwrap();
-    }
+    file_events
 }
 
 fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
