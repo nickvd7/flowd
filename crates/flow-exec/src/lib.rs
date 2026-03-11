@@ -1,10 +1,5 @@
-use anyhow::Result;
-use flow_dsl::AutomationSpec;
+pub mod engine;
+pub mod service;
 
-pub fn dry_run(spec: &AutomationSpec) -> Result<Vec<String>> {
-    let mut preview = vec![format!("trigger: {}", spec.trigger.r#type)];
-    for action in &spec.actions {
-        preview.push(format!("action: {:?}", action));
-    }
-    Ok(preview)
-}
+pub use engine::{dry_run, execute, plan, ExecutionReport, PlannedOperation};
+pub use service::{approve_suggestion, dry_run_automation, execute_automation, DryRunOutcome};

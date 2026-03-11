@@ -5,6 +5,7 @@
 ## High-level flow
 
 ```text
+OBSERVATION LAYER
 ┌─────────────────────┐
 │   Local event       │
 │   sources           │
@@ -27,6 +28,13 @@
           │
           ▼
 ┌─────────────────────┐
+│ Raw event storage   │
+│ + analysis trigger  │
+└─────────┬───────────┘
+          │
+          ▼
+ANALYSIS LAYER
+┌─────────────────────┐
 │   Normalization     │
 │                     │
 │ Convert raw events  │
@@ -41,14 +49,8 @@
           │
           ▼
 ┌─────────────────────┐
-│   SQLite storage    │
-│                     │
-│ - raw_events        │
-│ - normalized_events │
-│ - sessions          │
-│ - patterns          │
-│ - suggestions       │
-│ - automations       │
+│ Normalized event    │
+│ storage             │
 └─────────┬───────────┘
           │
           ▼
@@ -84,6 +86,7 @@
 └─────────┬───────────┘
           │
           ▼
+EXECUTION LAYER
 ┌─────────────────────┐
 │ flow-cli            │
 │                     │
@@ -96,12 +99,13 @@
           │
           ▼
 ┌─────────────────────┐
-│ Automation DSL      │
+│ Suggestion approval │
+│ + automation DSL    │
 │ + execution layer   │
 │                     │
 │ - dry-run preview   │
 │ - safe file actions │
-│ - undo log          │
+│ - automation_runs   │
 └─────────────────────┘
 ```
 
@@ -179,10 +183,10 @@ flow-adapters   -> local event capture
 flow-core       -> shared domain types and config
 flow-db         -> SQLite persistence and migrations
 flow-patterns   -> normalization, sessions, repeated-pattern detection
-flow-cli        -> terminal interface
-flow-daemon     -> background orchestration
+flow-cli        -> terminal interface for approval and execution
+flow-daemon     -> observation loop and analysis triggers
 flow-dsl        -> automation specification
-flow-exec       -> dry-run and execution
+flow-exec       -> approval, dry-run planning, and execution
 ```
 
 ---

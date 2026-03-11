@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand};
 use flow_core::config::Config;
 use flow_db::{
     open_database,
-    repo::{list_patterns, list_recent_sessions, list_suggestions},
+    repo::{list_automations, list_patterns, list_recent_sessions, list_suggestions},
 };
+use flow_exec::{approve_suggestion, dry_run_automation, execute_automation};
 use std::fmt::Display;
 
 #[derive(Debug, Parser)]
@@ -22,6 +23,10 @@ enum Commands {
     Suggestions,
     Sessions,
     Tail,
+    Approve { suggestion_id: i64 },
+    Automations,
+    Run { automation_id: i64 },
+    DryRun { automation_id: i64 },
 }
 
 fn main() {
@@ -41,6 +46,10 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Suggestions) => render_suggestions_table()?,
         Some(Commands::Sessions) => render_sessions()?,
         Some(Commands::Tail) => println!("tail: not implemented"),
+        Some(Commands::Approve { suggestion_id }) => approve_automation_command(suggestion_id)?,
+        Some(Commands::Automations) => render_automations()?,
+        Some(Commands::Run { automation_id }) => run_automation_command(automation_id)?,
+        Some(Commands::DryRun { automation_id }) => dry_run_automation_command(automation_id)?,
         None => println!("Use --help to see available commands."),
     }
 
@@ -134,6 +143,76 @@ fn render_sessions() -> anyhow::Result<()> {
         })
         .collect();
     print_table(&["session_id", "events", "duration"], &rows);
+    Ok(())
+}
+
+fn approve_automation_command(suggestion_id: i64) -> anyhow::Result<()> {
+    let mut conn = open_cli_database()?;
+    let automation_id =
+        approve_suggestion(&mut conn, suggestion_id).context("failed to approve suggestion")?;
+
+    println!("Approved suggestion {suggestion_id} as automation {automation_id}.");
+    Ok(())
+}
+
+fn render_automations() -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let automations = list_automations(&conn).context("failed to read automations")?;
+
+    if automations.is_empty() {
+        println!("No automations stored.");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = automations
+        .into_iter()
+        .map(|automation| {
+            vec![
+                automation.automation_id.to_string(),
+                automation
+                    .suggestion_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                automation.status,
+                automation.summary,
+            ]
+        })
+        .collect();
+    print_table(
+        &["automation_id", "suggestion_id", "status", "summary"],
+        &rows,
+    );
+    Ok(())
+}
+
+fn dry_run_automation_command(automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let outcome =
+        dry_run_automation(&conn, automation_id).context("failed to dry-run automation")?;
+
+    for line in &outcome.preview {
+        println!("{line}");
+    }
+
+    Ok(())
+}
+
+fn run_automation_command(automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let report =
+        execute_automation(&conn, automation_id).context("failed to execute automation")?;
+
+    if report.operations.is_empty() {
+        println!("No matching files.");
+    } else {
+        for operation in &report.operations {
+            println!(
+                "{}: {} -> {}",
+                operation.action, operation.from, operation.to
+            );
+        }
+    }
+
     Ok(())
 }
 
