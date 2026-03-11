@@ -61,6 +61,8 @@ pub struct StoredPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSession {
     pub session_id: i64,
+    pub start_ts: String,
+    pub end_ts: String,
     pub event_count: usize,
     pub duration_ms: i64,
 }
@@ -70,6 +72,10 @@ pub struct StoredAutomation {
     pub automation_id: i64,
     pub suggestion_id: Option<i64>,
     pub status: String,
+    pub accepted_at: Option<String>,
+    pub run_count: usize,
+    pub last_run_result: Option<String>,
+    pub last_run_finished_at: Option<String>,
     pub summary: String,
 }
 
@@ -677,8 +683,37 @@ pub fn set_automation_status(
 pub fn list_automations(conn: &Connection) -> rusqlite::Result<Vec<StoredAutomation>> {
     let mut statement = conn.prepare(
         r#"
-        SELECT id, suggestion_id, state, COALESCE(summary, '')
+        SELECT
+            automations.id,
+            automations.suggestion_id,
+            automations.state,
+            automations.accepted_at,
+            COALESCE(run_stats.run_count, 0),
+            run_stats.last_run_result,
+            run_stats.last_run_finished_at,
+            COALESCE(automations.summary, '')
         FROM automations
+        LEFT JOIN (
+            SELECT
+                automation_runs.automation_id,
+                COUNT(*) AS run_count,
+                (
+                    SELECT result
+                    FROM automation_runs AS latest
+                    WHERE latest.automation_id = automation_runs.automation_id
+                    ORDER BY latest.id DESC
+                    LIMIT 1
+                ) AS last_run_result,
+                (
+                    SELECT finished_at
+                    FROM automation_runs AS latest
+                    WHERE latest.automation_id = automation_runs.automation_id
+                    ORDER BY latest.id DESC
+                    LIMIT 1
+                ) AS last_run_finished_at
+            FROM automation_runs
+            GROUP BY automation_runs.automation_id
+        ) AS run_stats ON run_stats.automation_id = automations.id
         ORDER BY id ASC
         "#,
     )?;
@@ -688,7 +723,11 @@ pub fn list_automations(conn: &Connection) -> rusqlite::Result<Vec<StoredAutomat
             automation_id: row.get(0)?,
             suggestion_id: row.get(1)?,
             status: row.get(2)?,
-            summary: row.get(3)?,
+            accepted_at: row.get(3)?,
+            run_count: row.get::<_, i64>(4)? as usize,
+            last_run_result: row.get(5)?,
+            last_run_finished_at: row.get(6)?,
+            summary: row.get(7)?,
         })
     })?;
 
@@ -852,6 +891,8 @@ pub fn list_recent_sessions(
         r#"
         SELECT
             sessions.id,
+            sessions.start_ts,
+            sessions.end_ts,
             COUNT(session_events.event_id) AS event_count,
             ((strftime('%s', sessions.end_ts) - strftime('%s', sessions.start_ts)) * 1000) AS duration_ms
         FROM sessions
@@ -865,8 +906,10 @@ pub fn list_recent_sessions(
     let rows = statement.query_map([limit], |row| {
         Ok(StoredSession {
             session_id: row.get(0)?,
-            event_count: row.get::<_, i64>(1)? as usize,
-            duration_ms: row.get(2)?,
+            start_ts: row.get(1)?,
+            end_ts: row.get(2)?,
+            event_count: row.get::<_, i64>(3)? as usize,
+            duration_ms: row.get(4)?,
         })
     })?;
 

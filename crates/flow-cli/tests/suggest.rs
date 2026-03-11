@@ -1,5 +1,9 @@
+use chrono::{DateTime, Utc};
 use flow_adapters::file_watcher::FileEvent;
-use flow_db::{migrations::run_migrations, repo::insert_normalized_event_record};
+use flow_db::{
+    migrations::run_migrations,
+    repo::{insert_normalized_event_record, list_suggestions},
+};
 use flow_patterns::normalize::normalize;
 use rusqlite::Connection;
 use std::{path::Path, process::Command};
@@ -18,10 +22,20 @@ fn suggest_renders_detected_file_workflow() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Repeated invoice"));
-    assert!(stdout.contains("repeats: 2"));
-    assert!(stdout.contains("score:"));
-    assert!(stdout.contains("freshness: current"));
+    let conn = Connection::open(&db_path).unwrap();
+    let suggestion = list_suggestions(&conn).unwrap().remove(0);
+    let expected = format!(
+        "[{}] {}\n  pattern: {} | runs: {} | avg: {} | score: {:.3} | freshness: {} | last seen: {}\n",
+        suggestion.suggestion_id,
+        suggestion.proposal_text,
+        suggestion.canonical_summary,
+        suggestion.count,
+        format_duration(suggestion.avg_duration_ms),
+        suggestion.usefulness_score,
+        suggestion.freshness,
+        format_timestamp(&suggestion.last_seen_at),
+    );
+    assert_eq!(stdout, expected);
 }
 
 fn seed_database(db_path: &Path) {
@@ -43,4 +57,34 @@ fn seed_database(db_path: &Path) {
     for event in &normalized {
         insert_normalized_event_record(&mut conn, event).unwrap();
     }
+}
+
+fn format_duration(duration_ms: i64) -> String {
+    let total_seconds = duration_ms / 1000;
+
+    if duration_ms >= 60_000 && duration_ms % 1000 == 0 {
+        let minutes = total_seconds / 60;
+        let seconds = total_seconds % 60;
+        if seconds == 0 {
+            return format!("{minutes}m");
+        }
+        return format!("{minutes}m {seconds}s");
+    }
+
+    if duration_ms % 1000 == 0 {
+        return format!("{total_seconds}s");
+    }
+
+    format!("{duration_ms}ms")
+}
+
+fn format_timestamp(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M:%SZ")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_string())
 }

@@ -1,5 +1,12 @@
+use chrono::{DateTime, Utc};
 use flow_adapters::file_watcher::FileEvent;
-use flow_db::{migrations::run_migrations, repo::insert_normalized_event_record};
+use flow_db::{
+    migrations::run_migrations,
+    repo::{
+        insert_normalized_event_record, list_automations, list_patterns, list_recent_sessions,
+        list_suggestions,
+    },
+};
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
 use flow_patterns::normalize::normalize;
 use rusqlite::Connection;
@@ -19,11 +26,35 @@ fn patterns_renders_detected_workflows_table() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("pattern_id"));
-    assert!(stdout.contains("runs"));
-    assert!(stdout.contains("example"));
-    assert!(stdout.contains("invoice_invoice_reviewed_workflow"));
-    assert!(stdout.contains("create -> rename -> move"));
+    let conn = Connection::open(&db_path).unwrap();
+    let rows: Vec<Vec<String>> = list_patterns(&conn)
+        .unwrap()
+        .into_iter()
+        .map(|pattern| {
+            vec![
+                pattern.pattern_id.to_string(),
+                format!("{:.3}", pattern.usefulness_score),
+                render_pattern_name(&pattern.signature),
+                pattern.count.to_string(),
+                format_duration(pattern.avg_duration_ms),
+                format_timestamp(&pattern.last_seen_at),
+                render_pattern_example(&pattern.canonical_summary),
+            ]
+        })
+        .collect();
+    let expected = format_table(
+        &[
+            "id",
+            "score",
+            "pattern",
+            "runs",
+            "avg",
+            "last_seen",
+            "example",
+        ],
+        &rows,
+    );
+    assert_eq!(stdout, expected);
 }
 
 #[test]
@@ -40,13 +71,37 @@ fn suggestions_renders_detected_suggestions_table() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("suggestion_id"));
-    assert!(stdout.contains("pattern"));
-    assert!(stdout.contains("score"));
-    assert!(stdout.contains("freshness"));
-    assert!(stdout.contains("description"));
-    assert!(stdout.contains("current"));
-    assert!(stdout.contains("Repeated invoice file workflow detected"));
+    let conn = Connection::open(&db_path).unwrap();
+    let rows: Vec<Vec<String>> = list_suggestions(&conn)
+        .unwrap()
+        .into_iter()
+        .map(|suggestion| {
+            vec![
+                suggestion.suggestion_id.to_string(),
+                format!("{:.3}", suggestion.usefulness_score),
+                render_pattern_name(&suggestion.signature),
+                suggestion.count.to_string(),
+                format_duration(suggestion.avg_duration_ms),
+                suggestion.freshness,
+                format_timestamp(&suggestion.last_seen_at),
+                suggestion.proposal_text,
+            ]
+        })
+        .collect();
+    let expected = format_table(
+        &[
+            "id",
+            "score",
+            "pattern",
+            "runs",
+            "avg",
+            "freshness",
+            "last_seen",
+            "description",
+        ],
+        &rows,
+    );
+    assert_eq!(stdout, expected);
 }
 
 #[test]
@@ -63,12 +118,22 @@ fn sessions_renders_recent_sessions_table() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("session_id"));
-    assert!(stdout.contains("events"));
-    assert!(stdout.contains("duration"));
-    assert!(stdout.contains("40s"));
-    assert!(stdout.contains("2"));
-    assert!(stdout.contains("1"));
+    let conn = Connection::open(&db_path).unwrap();
+    let rows: Vec<Vec<String>> = list_recent_sessions(&conn, 20)
+        .unwrap()
+        .into_iter()
+        .map(|session| {
+            vec![
+                session.session_id.to_string(),
+                session.event_count.to_string(),
+                format_duration(session.duration_ms),
+                format_timestamp(&session.start_ts),
+                format_timestamp(&session.end_ts),
+            ]
+        })
+        .collect();
+    let expected = format_table(&["id", "events", "duration", "start", "end"], &rows);
+    assert_eq!(stdout, expected);
 }
 
 #[test]
@@ -95,10 +160,17 @@ fn approve_creates_automation_and_lists_it() {
 
     assert!(automations.status.success());
     let stdout = String::from_utf8(automations.stdout).unwrap();
-    assert!(stdout.contains("automation_id"));
-    assert!(stdout.contains("suggestion_id"));
+    assert!(stdout.contains("id"));
+    assert!(stdout.contains("suggestion"));
+    assert!(stdout.contains("status"));
+    assert!(stdout.contains("runs"));
     assert!(stdout.contains("active"));
     assert!(stdout.contains("Repeated invoice file workflow detected"));
+
+    let conn = Connection::open(&db_path).unwrap();
+    let automation = list_automations(&conn).unwrap().remove(0);
+    assert_eq!(automation.run_count, 0);
+    assert_eq!(automation.status, "active");
 }
 
 #[test]
@@ -252,9 +324,10 @@ fn runs_lists_completed_execution_history() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("run_id"));
-    assert!(stdout.contains("automation_id"));
+    assert!(stdout.contains("automation"));
+    assert!(stdout.contains("ops"));
     assert!(stdout.contains("completed"));
+    assert!(stdout.contains("2"));
 }
 
 #[test]
@@ -544,6 +617,109 @@ fn seed_database(db_path: &Path) {
     for event in &normalized {
         insert_normalized_event_record(&mut conn, event).unwrap();
     }
+}
+
+fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
+    for row in rows {
+        for (index, value) in row.iter().enumerate() {
+            widths[index] = widths[index].max(value.len());
+        }
+    }
+
+    let mut lines = Vec::with_capacity(rows.len() + 2);
+    lines.push(format_row(headers.iter().copied(), &widths));
+    lines.push(
+        widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("-+-"),
+    );
+    for row in rows {
+        lines.push(format_row(row.iter(), &widths));
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn format_row<'a, I, T>(values: I, widths: &[usize]) -> String
+where
+    I: IntoIterator<Item = T>,
+    T: std::fmt::Display,
+{
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| format!("{value:<width$}", width = widths[index]))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn format_duration(duration_ms: i64) -> String {
+    let total_seconds = duration_ms / 1000;
+
+    if duration_ms >= 60_000 && duration_ms % 1000 == 0 {
+        let minutes = total_seconds / 60;
+        let seconds = total_seconds % 60;
+        if seconds == 0 {
+            return format!("{minutes}m");
+        }
+        return format!("{minutes}m {seconds}s");
+    }
+
+    if duration_ms % 1000 == 0 {
+        return format!("{total_seconds}s");
+    }
+
+    format!("{duration_ms}ms")
+}
+
+fn format_timestamp(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M:%SZ")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn render_pattern_name(signature: &str) -> String {
+    let mut groups = Vec::new();
+    for group in signature
+        .split("->")
+        .map(|part| part.split(':').nth(1).unwrap_or("file").replace('-', "_"))
+    {
+        if groups.last() != Some(&group) {
+            groups.push(group);
+        }
+    }
+    groups.push("workflow".to_string());
+    groups.join("_")
+}
+
+fn render_pattern_example(summary: &str) -> String {
+    summary
+        .split(" -> ")
+        .map(render_action_label)
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+fn render_action_label(action: &str) -> String {
+    let normalized = action.strip_suffix("File").unwrap_or(action);
+    let mut label = String::new();
+
+    for (index, ch) in normalized.chars().enumerate() {
+        if ch.is_uppercase() && index > 0 {
+            label.push(' ');
+        }
+        label.push(ch.to_ascii_lowercase());
+    }
+
+    label
 }
 
 fn approve_suggestion(db_path: &Path) {
