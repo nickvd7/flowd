@@ -7,6 +7,7 @@ This repository is a starter template for a terminal-first daemon + CLI that:
 - normalizes them into workflow steps
 - detects repeated patterns
 - proposes safe automations
+- refreshes stored suggestions from persisted SQLite event history
 
 ## Language Policy
 
@@ -46,3 +47,5 @@ cargo run -p flow-daemon
 ```
 
 `flow-cli suggest` reads pending suggestions from SQLite. By default it uses `./flowd.db`; tests and local runs can override this with `FLOWD_DB_PATH=/path/to/flowd.db`.
+
+`flow-daemon` persists raw file events, stores normalized file events, and rebuilds sessions, repeated patterns, and pending suggestions after each normalized file event.

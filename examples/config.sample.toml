@@ -1,5 +1,5 @@
 database_path = "./flowd.db"
-observed_folders = ["~/Downloads"]
+watched_directories = ["~/Downloads", "~/Desktop", "~/Documents"]
 observe_clipboard = false
 observe_terminal = true
 observe_active_window = false

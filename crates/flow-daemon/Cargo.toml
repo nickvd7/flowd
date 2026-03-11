@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 flow-core = { path = "../flow-core" }
+flow-adapters = { path = "../flow-adapters" }
+flow-db = { path = "../flow-db" }
+rusqlite.workspace = true
