@@ -152,10 +152,41 @@ mod tests {
     use super::*;
     use crate::migrations::run_migrations;
     use chrono::Utc;
-    use flow_adapters::file_watcher::FileEvent;
+    use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
+    use flow_core::events::EventSource;
     use flow_patterns::{
         detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
     };
+    use tempfile::tempdir;
+
+    #[test]
+    fn inserts_raw_event_records() {
+        let dir = tempdir().unwrap();
+        let conn = crate::open_database(dir.path().join("flowd.db")).unwrap();
+        let raw_event = synthetic_file_event(
+            Utc::now(),
+            FileEventKind::Create,
+            dir.path().join("report.txt").display().to_string(),
+            None,
+        );
+
+        let inserted = insert_raw_event(&conn, &raw_event).unwrap();
+        assert_eq!(inserted, 1);
+
+        let (source, payload_json): (String, String) = conn
+            .query_row(
+                "SELECT source, payload_json FROM raw_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(source, format!("{:?}", EventSource::FileWatcher));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload_json).unwrap(),
+            raw_event.payload
+        );
+    }
 
     #[test]
     fn stores_and_reads_detected_suggestions() {
