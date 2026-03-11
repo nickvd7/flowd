@@ -91,6 +91,16 @@ pub struct AutomationRunRecord<'a> {
     pub undo_payload_json: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAutomationRun {
+    pub run_id: i64,
+    pub automation_id: i64,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub result: String,
+    pub undo_payload_json: Option<String>,
+}
+
 pub fn insert_raw_event(conn: &Connection, event: &RawEvent) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO raw_events (ts, source, payload_json) VALUES (?1, ?2, ?3)",
@@ -729,6 +739,59 @@ pub fn insert_automation_run(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+pub fn list_automation_runs(conn: &Connection) -> rusqlite::Result<Vec<StoredAutomationRun>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, automation_id, started_at, finished_at, result, undo_payload_json
+        FROM automation_runs
+        ORDER BY id DESC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        Ok(StoredAutomationRun {
+            run_id: row.get(0)?,
+            automation_id: row.get(1)?,
+            started_at: row.get(2)?,
+            finished_at: row.get(3)?,
+            result: row.get(4)?,
+            undo_payload_json: row.get(5)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn load_automation_run(
+    conn: &Connection,
+    run_id: i64,
+) -> rusqlite::Result<Option<StoredAutomationRun>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, automation_id, started_at, finished_at, result, undo_payload_json
+        FROM automation_runs
+        WHERE id = ?1
+        "#,
+    )?;
+
+    let row = statement.query_row([run_id], |row| {
+        Ok(StoredAutomationRun {
+            run_id: row.get(0)?,
+            automation_id: row.get(1)?,
+            started_at: row.get(2)?,
+            finished_at: row.get(3)?,
+            result: row.get(4)?,
+            undo_payload_json: row.get(5)?,
+        })
+    });
+
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn load_example_events_for_pattern(
