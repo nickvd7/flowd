@@ -1,4 +1,5 @@
 use anyhow::Context;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use flow_core::config::Config;
 use flow_db::{
@@ -9,6 +10,7 @@ use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
     execute_automation, list_runs, undo_automation_run,
 };
+use serde_json::Value;
 use std::fmt::Display;
 
 #[derive(Debug, Parser)]
@@ -77,14 +79,18 @@ fn render_suggestions() -> anyhow::Result<()> {
     }
 
     for suggestion in suggestions {
-        println!("{}", suggestion.proposal_text);
         println!(
-            "  pattern: {} | repeats: {} | avg duration: {} ms | score: {:.3} | freshness: {}",
+            "[{}] {}",
+            suggestion.suggestion_id, suggestion.proposal_text
+        );
+        println!(
+            "  pattern: {} | runs: {} | avg: {} | score: {:.3} | freshness: {} | last seen: {}",
             suggestion.canonical_summary,
             suggestion.count,
-            suggestion.avg_duration_ms,
+            format_duration(suggestion.avg_duration_ms),
             suggestion.usefulness_score,
-            suggestion.freshness
+            suggestion.freshness,
+            format_timestamp(&suggestion.last_seen_at)
         );
     }
 
@@ -104,13 +110,28 @@ fn render_patterns() -> anyhow::Result<()> {
         .into_iter()
         .map(|pattern| {
             vec![
+                pattern.pattern_id.to_string(),
+                format!("{:.3}", pattern.usefulness_score),
                 render_pattern_name(&pattern.signature),
                 pattern.count.to_string(),
+                format_duration(pattern.avg_duration_ms),
+                format_timestamp(&pattern.last_seen_at),
                 render_pattern_example(&pattern.canonical_summary),
             ]
         })
         .collect();
-    print_table(&["pattern_id", "runs", "example"], &rows);
+    print_table(
+        &[
+            "id",
+            "score",
+            "pattern",
+            "runs",
+            "avg",
+            "last_seen",
+            "example",
+        ],
+        &rows,
+    );
     Ok(())
 }
 
@@ -128,21 +149,25 @@ fn render_suggestions_table() -> anyhow::Result<()> {
         .map(|suggestion| {
             vec![
                 suggestion.suggestion_id.to_string(),
+                format!("{:.3}", suggestion.usefulness_score),
                 render_pattern_name(&suggestion.signature),
                 suggestion.count.to_string(),
-                format!("{:.3}", suggestion.usefulness_score),
+                format_duration(suggestion.avg_duration_ms),
                 suggestion.freshness,
+                format_timestamp(&suggestion.last_seen_at),
                 suggestion.proposal_text,
             ]
         })
         .collect();
     print_table(
         &[
-            "suggestion_id",
+            "id",
+            "score",
             "pattern",
             "runs",
-            "score",
+            "avg",
             "freshness",
+            "last_seen",
             "description",
         ],
         &rows,
@@ -166,10 +191,12 @@ fn render_sessions() -> anyhow::Result<()> {
                 session.session_id.to_string(),
                 session.event_count.to_string(),
                 format_duration(session.duration_ms),
+                format_timestamp(&session.start_ts),
+                format_timestamp(&session.end_ts),
             ]
         })
         .collect();
-    print_table(&["session_id", "events", "duration"], &rows);
+    print_table(&["id", "events", "duration", "start", "end"], &rows);
     Ok(())
 }
 
@@ -201,12 +228,35 @@ fn render_automations() -> anyhow::Result<()> {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "-".to_string()),
                 automation.status,
+                automation.run_count.to_string(),
+                automation
+                    .last_run_result
+                    .unwrap_or_else(|| "-".to_string()),
+                automation
+                    .last_run_finished_at
+                    .as_deref()
+                    .map(format_timestamp)
+                    .unwrap_or_else(|| "-".to_string()),
+                automation
+                    .accepted_at
+                    .as_deref()
+                    .map(format_timestamp)
+                    .unwrap_or_else(|| "-".to_string()),
                 automation.summary,
             ]
         })
         .collect();
     print_table(
-        &["automation_id", "suggestion_id", "status", "summary"],
+        &[
+            "id",
+            "suggestion",
+            "status",
+            "runs",
+            "last_run",
+            "last_at",
+            "accepted",
+            "summary",
+        ],
         &rows,
     );
     Ok(())
@@ -273,19 +323,17 @@ fn render_runs() -> anyhow::Result<()> {
                 run.run_id.to_string(),
                 run.automation_id.to_string(),
                 run.result,
-                run.started_at,
-                run.finished_at.unwrap_or_else(|| "-".to_string()),
+                summarize_run_operations(run.undo_payload_json.as_deref()).to_string(),
+                format_timestamp(&run.started_at),
+                run.finished_at
+                    .as_deref()
+                    .map(format_timestamp)
+                    .unwrap_or_else(|| "-".to_string()),
             ]
         })
         .collect();
     print_table(
-        &[
-            "run_id",
-            "automation_id",
-            "result",
-            "started_at",
-            "finished_at",
-        ],
+        &["id", "automation", "result", "ops", "started", "finished"],
         &rows,
     );
     Ok(())
@@ -340,11 +388,60 @@ fn render_pattern_example(summary: &str) -> String {
 }
 
 fn format_duration(duration_ms: i64) -> String {
-    if duration_ms % 1000 == 0 {
-        format!("{}s", duration_ms / 1000)
-    } else {
-        format!("{duration_ms}ms")
+    let total_seconds = duration_ms / 1000;
+
+    if duration_ms >= 60_000 && duration_ms % 1000 == 0 {
+        let minutes = total_seconds / 60;
+        let seconds = total_seconds % 60;
+        if seconds == 0 {
+            return format!("{minutes}m");
+        }
+        return format!("{minutes}m {seconds}s");
     }
+
+    if duration_ms % 1000 == 0 {
+        return format!("{total_seconds}s");
+    }
+
+    format!("{duration_ms}ms")
+}
+
+fn format_timestamp(value: &str) -> String {
+    if value.trim().is_empty() {
+        return "-".to_string();
+    }
+
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M:%SZ")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn summarize_run_operations(payload: Option<&str>) -> usize {
+    let Some(payload) = payload else {
+        return 0;
+    };
+
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        return 0;
+    };
+
+    value
+        .get("operations")
+        .and_then(|operations| operations.as_array())
+        .map(|operations| operations.len())
+        .or_else(|| {
+            value
+                .get("report")
+                .and_then(|report| report.get("operations"))
+                .and_then(|operations| operations.as_array())
+                .map(|operations| operations.len())
+        })
+        .unwrap_or(0)
 }
 
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
