@@ -20,6 +20,8 @@ fn suggest_renders_detected_file_workflow() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Repeated invoice"));
     assert!(stdout.contains("repeats: 2"));
+    assert!(stdout.contains("score:"));
+    assert!(stdout.contains("freshness: current"));
 }
 
 fn seed_database(db_path: &Path) {

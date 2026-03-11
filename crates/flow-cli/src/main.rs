@@ -68,8 +68,12 @@ fn render_suggestions() -> anyhow::Result<()> {
     for suggestion in suggestions {
         println!("{}", suggestion.proposal_text);
         println!(
-            "  pattern: {} | repeats: {} | avg duration: {} ms",
-            suggestion.canonical_summary, suggestion.count, suggestion.avg_duration_ms
+            "  pattern: {} | repeats: {} | avg duration: {} ms | score: {:.3} | freshness: {}",
+            suggestion.canonical_summary,
+            suggestion.count,
+            suggestion.avg_duration_ms,
+            suggestion.usefulness_score,
+            suggestion.freshness
         );
     }
 
@@ -115,11 +119,16 @@ fn render_suggestions_table() -> anyhow::Result<()> {
                 suggestion.suggestion_id.to_string(),
                 render_pattern_name(&suggestion.signature),
                 suggestion.count.to_string(),
+                format!("{:.3}", suggestion.usefulness_score),
+                suggestion.freshness,
                 suggestion.proposal_text,
             ]
         })
         .collect();
-    print_table(&["suggestion_id", "pattern", "runs", "description"], &rows);
+    print_table(
+        &["suggestion_id", "pattern", "runs", "score", "freshness", "description"],
+        &rows,
+    );
     Ok(())
 }
 

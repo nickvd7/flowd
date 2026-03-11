@@ -15,6 +15,9 @@ pub struct StoredSuggestion {
     pub avg_duration_ms: i64,
     pub canonical_summary: String,
     pub proposal_text: String,
+    pub usefulness_score: f64,
+    pub freshness: String,
+    pub last_seen_at: String,
     pub created_at: String,
 }
 
@@ -40,13 +43,15 @@ pub struct StoredNormalizedEvent {
     pub event: NormalizedEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredPattern {
     pub pattern_id: i64,
     pub signature: String,
     pub count: usize,
     pub avg_duration_ms: i64,
     pub canonical_summary: String,
+    pub usefulness_score: f64,
+    pub last_seen_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,10 +263,21 @@ pub fn insert_pattern(
     count: usize,
     avg_duration_ms: i64,
     canonical_summary: &str,
+    last_seen_at: &str,
+    safety_score: f64,
+    usefulness_score: f64,
 ) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO patterns (signature, count, avg_duration_ms, canonical_summary, confidence) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![signature, count as i64, avg_duration_ms, canonical_summary, count as f64],
+        "INSERT INTO patterns (signature, count, avg_duration_ms, canonical_summary, confidence, last_seen_at, safety_score, is_active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+        params![
+            signature,
+            count as i64,
+            avg_duration_ms,
+            canonical_summary,
+            usefulness_score,
+            last_seen_at,
+            safety_score
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -269,6 +285,12 @@ pub fn insert_pattern(
 pub fn clear_analysis_state(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM suggestions", [])?;
     conn.execute("DELETE FROM patterns", [])?;
+    conn.execute("DELETE FROM session_events", [])?;
+    conn.execute("DELETE FROM sessions", [])?;
+    Ok(())
+}
+
+fn clear_session_state(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM session_events", [])?;
     conn.execute("DELETE FROM sessions", [])?;
     Ok(())
@@ -285,7 +307,7 @@ pub fn refresh_analysis_state(conn: &mut Connection, inactivity_secs: i64) -> ru
     let created_at = Utc::now().to_rfc3339();
 
     let tx = conn.transaction()?;
-    clear_analysis_state(&tx)?;
+    clear_session_state(&tx)?;
 
     let mut offset = 0usize;
     for session in &sessions {
@@ -303,17 +325,29 @@ pub fn refresh_analysis_state(conn: &mut Connection, inactivity_secs: i64) -> ru
         offset = next_offset;
     }
 
+    let mut active_pattern_ids = Vec::new();
     for pattern in patterns {
-        let pattern_id = insert_pattern(
+        let pattern_id = upsert_pattern(
             &tx,
             &pattern.signature,
             pattern.count,
             pattern.avg_duration_ms,
             &pattern.canonical_summary,
+            &pattern.last_seen_at.to_rfc3339(),
+            pattern.safety_score,
+            pattern.usefulness_score,
         )?;
-        insert_suggestion(&tx, pattern_id, &pattern.proposal_text, &created_at)?;
+        sync_suggestion_for_pattern(
+            &tx,
+            pattern_id,
+            &pattern.proposal_text,
+            &created_at,
+            pattern.usefulness_score,
+        )?;
+        active_pattern_ids.push(pattern_id);
     }
 
+    mark_stale_patterns_and_suggestions(&tx, &active_pattern_ids)?;
     tx.commit()?;
     Ok(())
 }
@@ -323,16 +357,159 @@ pub fn insert_suggestion(
     pattern_id: i64,
     proposal_text: &str,
     created_at: &str,
+    usefulness_score: f64,
 ) -> rusqlite::Result<i64> {
     let proposal_json = json!({
         "kind": "file_workflow",
         "message": proposal_text,
     });
     conn.execute(
-        "INSERT INTO suggestions (pattern_id, status, proposal_json, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![pattern_id, "pending", proposal_json.to_string(), created_at],
+        "INSERT INTO suggestions (pattern_id, status, proposal_json, created_at, usefulness_score, freshness) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            pattern_id,
+            "pending",
+            proposal_json.to_string(),
+            created_at,
+            usefulness_score,
+            "current"
+        ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+fn upsert_pattern(
+    conn: &Connection,
+    signature: &str,
+    count: usize,
+    avg_duration_ms: i64,
+    canonical_summary: &str,
+    last_seen_at: &str,
+    safety_score: f64,
+    usefulness_score: f64,
+) -> rusqlite::Result<i64> {
+    let existing = conn.query_row(
+        "SELECT id FROM patterns WHERE signature = ?1",
+        [signature],
+        |row| row.get::<_, i64>(0),
+    );
+
+    match existing {
+        Ok(pattern_id) => {
+            conn.execute(
+                "UPDATE patterns SET count = ?2, avg_duration_ms = ?3, canonical_summary = ?4, confidence = ?5, last_seen_at = ?6, safety_score = ?7, is_active = 1 WHERE id = ?1",
+                params![
+                    pattern_id,
+                    count as i64,
+                    avg_duration_ms,
+                    canonical_summary,
+                    usefulness_score,
+                    last_seen_at,
+                    safety_score
+                ],
+            )?;
+            Ok(pattern_id)
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => insert_pattern(
+            conn,
+            signature,
+            count,
+            avg_duration_ms,
+            canonical_summary,
+            last_seen_at,
+            safety_score,
+            usefulness_score,
+        ),
+        Err(error) => Err(error),
+    }
+}
+
+fn sync_suggestion_for_pattern(
+    conn: &Connection,
+    pattern_id: i64,
+    proposal_text: &str,
+    created_at: &str,
+    usefulness_score: f64,
+) -> rusqlite::Result<()> {
+    let approved_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM suggestions WHERE pattern_id = ?1 AND status = 'approved'",
+        [pattern_id],
+        |row| row.get(0),
+    )?;
+    let proposal_json = json!({
+        "kind": "file_workflow",
+        "message": proposal_text,
+    })
+    .to_string();
+
+    if approved_count > 0 {
+        conn.execute(
+            "UPDATE suggestions SET freshness = 'stale', usefulness_score = ?2 WHERE pattern_id = ?1 AND status != 'approved'",
+            params![pattern_id, usefulness_score],
+        )?;
+        return Ok(());
+    }
+
+    let mut statement = conn.prepare(
+        "SELECT id FROM suggestions WHERE pattern_id = ?1 AND status != 'approved' ORDER BY id ASC",
+    )?;
+    let suggestion_ids = statement
+        .query_map([pattern_id], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if let Some(primary_id) = suggestion_ids.first().copied() {
+        conn.execute(
+            "UPDATE suggestions SET status = 'pending', proposal_json = ?2, usefulness_score = ?3, freshness = 'current' WHERE id = ?1",
+            params![primary_id, proposal_json, usefulness_score],
+        )?;
+        for duplicate_id in suggestion_ids.into_iter().skip(1) {
+            conn.execute(
+                "UPDATE suggestions SET freshness = 'stale', usefulness_score = ?2 WHERE id = ?1",
+                params![duplicate_id, usefulness_score],
+            )?;
+        }
+        return Ok(());
+    }
+
+    insert_suggestion(conn, pattern_id, proposal_text, created_at, usefulness_score)?;
+    Ok(())
+}
+
+fn mark_stale_patterns_and_suggestions(
+    conn: &Connection,
+    active_pattern_ids: &[i64],
+) -> rusqlite::Result<()> {
+    if active_pattern_ids.is_empty() {
+        conn.execute("UPDATE patterns SET is_active = 0", [])?;
+        conn.execute(
+            "UPDATE suggestions SET freshness = 'stale' WHERE status = 'pending'",
+            [],
+        )?;
+        return Ok(());
+    }
+
+    let placeholders = std::iter::repeat_n("?", active_pattern_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    conn.execute(
+        &format!(
+            "UPDATE patterns SET is_active = 0 WHERE id NOT IN ({placeholders})"
+        ),
+        rusqlite::params_from_iter(active_pattern_ids.iter()),
+    )?;
+    conn.execute(
+        &format!(
+            "UPDATE patterns SET is_active = 1 WHERE id IN ({placeholders})"
+        ),
+        rusqlite::params_from_iter(active_pattern_ids.iter()),
+    )?;
+    conn.execute(
+        &format!(
+            "UPDATE suggestions SET freshness = 'stale' WHERE status = 'pending' AND pattern_id NOT IN ({placeholders})"
+        ),
+        rusqlite::params_from_iter(active_pattern_ids.iter()),
+    )?;
+    Ok(())
 }
 
 pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggestion>> {
@@ -346,11 +523,16 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
             patterns.avg_duration_ms,
             COALESCE(patterns.canonical_summary, ''),
             suggestions.proposal_json,
+            suggestions.usefulness_score,
+            suggestions.freshness,
+            COALESCE(patterns.last_seen_at, ''),
             suggestions.created_at
         FROM suggestions
         INNER JOIN patterns ON patterns.id = suggestions.pattern_id
         WHERE suggestions.status = 'pending'
-        ORDER BY patterns.count DESC, patterns.signature ASC, suggestions.created_at ASC
+            AND suggestions.freshness = 'current'
+            AND patterns.is_active = 1
+        ORDER BY suggestions.usefulness_score DESC, patterns.count DESC, patterns.signature ASC, suggestions.created_at ASC
         "#,
     )?;
 
@@ -376,7 +558,10 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            created_at: row.get(7)?,
+            usefulness_score: row.get(7)?,
+            freshness: row.get(8)?,
+            last_seen_at: row.get(9)?,
+            created_at: row.get(10)?,
         })
     })?;
 
@@ -552,9 +737,10 @@ pub fn load_example_events_for_pattern(
 pub fn list_patterns(conn: &Connection) -> rusqlite::Result<Vec<StoredPattern>> {
     let mut statement = conn.prepare(
         r#"
-        SELECT id, signature, count, avg_duration_ms, COALESCE(canonical_summary, '')
+        SELECT id, signature, count, avg_duration_ms, COALESCE(canonical_summary, ''), confidence, COALESCE(last_seen_at, '')
         FROM patterns
-        ORDER BY count DESC, signature ASC, id ASC
+        WHERE is_active = 1
+        ORDER BY confidence DESC, count DESC, signature ASC, id ASC
         "#,
     )?;
 
@@ -565,6 +751,8 @@ pub fn list_patterns(conn: &Connection) -> rusqlite::Result<Vec<StoredPattern>> 
             count: row.get::<_, i64>(2)? as usize,
             avg_duration_ms: row.get(3)?,
             canonical_summary: row.get(4)?,
+            usefulness_score: row.get(5)?,
+            last_seen_at: row.get(6)?,
         })
     })?;
 
@@ -776,6 +964,8 @@ mod tests {
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].count, 2);
         assert!(suggestions[0].proposal_text.contains("invoice"));
+        assert_eq!(suggestions[0].freshness, "current");
+        assert!(suggestions[0].usefulness_score > 0.7);
     }
 
     #[test]
@@ -808,6 +998,7 @@ mod tests {
         let suggestions = list_suggestions(&conn).unwrap();
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].count, 2);
+        assert_eq!(suggestions[0].freshness, "current");
 
         let pattern_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))
@@ -818,6 +1009,108 @@ mod tests {
 
         assert_eq!(pattern_count, 1);
         assert_eq!(suggestion_count, 1);
+    }
+
+    #[test]
+    fn marks_pending_suggestions_stale_when_patterns_disappear() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/invoice_file_events.json"
+        );
+        let raw_fixture = std::fs::read_to_string(fixture_path).unwrap();
+        let file_events: Vec<FileEvent> = serde_json::from_str(&raw_fixture).unwrap();
+        let raw_events: Vec<_> = file_events
+            .into_iter()
+            .map(FileEvent::into_raw_event)
+            .collect();
+        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
+
+        for event in &normalized {
+            insert_normalized_event_record(&mut conn, event).unwrap();
+        }
+
+        assert_eq!(list_suggestions(&conn).unwrap().len(), 1);
+
+        conn.execute("DELETE FROM normalized_events", []).unwrap();
+        refresh_analysis_state(&mut conn, DEFAULT_SESSION_INACTIVITY_SECS).unwrap();
+
+        let visible = list_suggestions(&conn).unwrap();
+        assert!(visible.is_empty());
+
+        let (freshness, status): (String, String) = conn
+            .query_row(
+                "SELECT freshness, status FROM suggestions ORDER BY id ASC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let is_active: i64 = conn
+            .query_row("SELECT is_active FROM patterns ORDER BY id ASC LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(freshness, "stale");
+        assert_eq!(status, "pending");
+        assert_eq!(is_active, 0);
+    }
+
+    #[test]
+    fn preserves_approved_suggestions_and_automations_during_refresh() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/invoice_file_events.json"
+        );
+        let raw_fixture = std::fs::read_to_string(fixture_path).unwrap();
+        let file_events: Vec<FileEvent> = serde_json::from_str(&raw_fixture).unwrap();
+        let raw_events: Vec<_> = file_events
+            .into_iter()
+            .map(FileEvent::into_raw_event)
+            .collect();
+        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
+
+        for event in &normalized {
+            insert_normalized_event_record(&mut conn, event).unwrap();
+        }
+
+        let suggestions = list_suggestions(&conn).unwrap();
+        assert_eq!(suggestions.len(), 1);
+        let suggestion = &suggestions[0];
+        set_suggestion_status(&conn, suggestion.suggestion_id, "approved").unwrap();
+        insert_automation(
+            &conn,
+            suggestion.suggestion_id,
+            "id: test\ntrigger: {}\nactions: []\n",
+            "approved",
+            &suggestion.proposal_text,
+            "2026-01-15T10:00:00Z",
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM normalized_events", []).unwrap();
+        refresh_analysis_state(&mut conn, DEFAULT_SESSION_INACTIVITY_SECS).unwrap();
+
+        let suggestion_row: (String, String) = conn
+            .query_row(
+                "SELECT status, freshness FROM suggestions WHERE id = ?1",
+                [suggestion.suggestion_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let automation_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM automations", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(suggestion_row.0, "approved");
+        assert_eq!(suggestion_row.1, "current");
+        assert_eq!(automation_count, 1);
+        assert!(list_suggestions(&conn).unwrap().is_empty());
     }
 
     #[test]

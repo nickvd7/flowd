@@ -41,7 +41,10 @@ fn suggestions_renders_detected_suggestions_table() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("suggestion_id"));
     assert!(stdout.contains("pattern"));
+    assert!(stdout.contains("score"));
+    assert!(stdout.contains("freshness"));
     assert!(stdout.contains("description"));
+    assert!(stdout.contains("current"));
     assert!(stdout.contains("Repeated invoice file workflow detected"));
 }
 
