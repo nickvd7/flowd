@@ -6,4 +6,6 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+flow-adapters = { path = "../flow-adapters" }
 flow-core = { path = "../flow-core" }
+serde_json.workspace = true

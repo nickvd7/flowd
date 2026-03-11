@@ -7,5 +7,9 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 flow-core = { path = "../flow-core" }
+notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
