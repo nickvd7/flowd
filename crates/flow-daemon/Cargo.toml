@@ -8,4 +8,10 @@ license.workspace = true
 anyhow.workspace = true
 flow-adapters = { path = "../flow-adapters" }
 flow-core = { path = "../flow-core" }
+flow-db = { path = "../flow-db" }
+rusqlite.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true

@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
 use flow_core::config::Config;
+use flow_core::events::RawEvent;
+use flow_db::{migrations::run_migrations, repo::insert_raw_event};
+use rusqlite::Connection;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -16,6 +19,7 @@ fn main() {
 fn run() -> Result<()> {
     let config = load_config().context("failed to load daemon config")?;
     let observed_paths = resolve_observed_paths(&config)?;
+    let conn = open_database(&config).context("failed to initialize daemon database")?;
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
 
     for path in &observed_paths {
@@ -29,6 +33,8 @@ fn run() -> Result<()> {
             Ok(event) => {
                 for file_event in event_to_file_events(&event) {
                     let raw_event = file_event.into_raw_event();
+                    persist_raw_event(&conn, &raw_event)
+                        .context("failed to persist raw filesystem event")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
             }
@@ -69,6 +75,19 @@ fn resolve_observed_paths(config: &Config) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn open_database(config: &Config) -> Result<Connection> {
+    let db_path = expand_home(&config.database_path);
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open database at {}", db_path.display()))?;
+    run_migrations(&conn).context("failed to run database migrations")?;
+    Ok(conn)
+}
+
+fn persist_raw_event(conn: &Connection, raw_event: &RawEvent) -> Result<()> {
+    insert_raw_event(conn, raw_event).context("failed to insert raw event")?;
+    Ok(())
+}
+
 fn expand_home(raw: &str) -> PathBuf {
     if raw == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(raw));
@@ -90,10 +109,66 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use flow_adapters::file_watcher::{synthetic_file_event, FileEventKind};
+    use flow_core::events::EventSource;
+    use tempfile::tempdir;
 
     #[test]
     fn expands_tilde_prefixed_paths() {
         let home = home_dir().unwrap();
         assert_eq!(expand_home("~/Downloads"), home.join("Downloads"));
+    }
+
+    #[test]
+    fn opens_database_and_runs_migrations() {
+        let dir = tempdir().unwrap();
+        let config = Config {
+            database_path: dir.path().join("flowd.db").display().to_string(),
+            ..Config::default()
+        };
+
+        let conn = open_database(&config).unwrap();
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'raw_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(table_exists, 1);
+    }
+
+    #[test]
+    fn persists_raw_events_to_sqlite() {
+        let dir = tempdir().unwrap();
+        let config = Config {
+            database_path: dir.path().join("flowd.db").display().to_string(),
+            ..Config::default()
+        };
+        let conn = open_database(&config).unwrap();
+        let raw_event = synthetic_file_event(
+            Utc::now(),
+            FileEventKind::Create,
+            dir.path().join("report.txt").display().to_string(),
+            None,
+        );
+
+        persist_raw_event(&conn, &raw_event).unwrap();
+
+        let (source, payload_json): (String, String) = conn
+            .query_row(
+                "SELECT source, payload_json FROM raw_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(source, format!("{:?}", EventSource::FileWatcher));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload_json).unwrap(),
+            raw_event.payload
+        );
     }
 }

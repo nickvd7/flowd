@@ -269,9 +269,13 @@ name = "flow-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "flow-adapters",
  "flow-core",
+ "flow-db",
+ "rusqlite",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
