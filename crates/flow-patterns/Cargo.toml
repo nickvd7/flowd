@@ -8,3 +8,6 @@ license.workspace = true
 chrono.workspace = true
 flow-core = { path = "../flow-core" }
 serde_json.workspace = true
+
+[dev-dependencies]
+flow-adapters = { path = "../flow-adapters" }

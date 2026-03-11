@@ -32,7 +32,7 @@ pub enum ActionType {
     DownloadFile,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NormalizedEvent {
     pub ts: DateTime<Utc>,
     pub action_type: ActionType,

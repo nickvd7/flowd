@@ -5,5 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 clap.workspace = true
 flow-core = { path = "../flow-core" }
+flow-db = { path = "../flow-db" }
+rusqlite.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+flow-adapters = { path = "../flow-adapters" }
+flow-patterns = { path = "../flow-patterns" }
+serde_json.workspace = true
+tempfile.workspace = true
