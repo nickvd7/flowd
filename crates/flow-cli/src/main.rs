@@ -1,8 +1,11 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use flow_core::config::Config;
-use flow_db::{migrations::run_migrations, repo::list_suggestions};
-use rusqlite::Connection;
+use flow_db::{
+    open_database,
+    repo::{list_patterns, list_recent_sessions, list_suggestions},
+};
+use std::fmt::Display;
 
 #[derive(Debug, Parser)]
 #[command(name = "flowctl", version, about = "CLI for flowd")]
@@ -16,6 +19,8 @@ enum Commands {
     Status,
     Patterns,
     Suggest,
+    Suggestions,
+    Sessions,
     Tail,
 }
 
@@ -31,8 +36,10 @@ fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Status) => println!("flowd status: template skeleton"),
-        Some(Commands::Patterns) => println!("patterns: not implemented"),
+        Some(Commands::Patterns) => render_patterns()?,
         Some(Commands::Suggest) => render_suggestions()?,
+        Some(Commands::Suggestions) => render_suggestions_table()?,
+        Some(Commands::Sessions) => render_sessions()?,
         Some(Commands::Tail) => println!("tail: not implemented"),
         None => println!("Use --help to see available commands."),
     }
@@ -41,13 +48,7 @@ fn run() -> anyhow::Result<()> {
 }
 
 fn render_suggestions() -> anyhow::Result<()> {
-    let db_path = std::env::var("FLOWD_DB_PATH")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| Config::default().database_path);
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("failed to open database at {db_path}"))?;
-    run_migrations(&conn).context("failed to run database migrations")?;
+    let conn = open_cli_database()?;
     let suggestions = list_suggestions(&conn).context("failed to read suggestions")?;
 
     if suggestions.is_empty() {
@@ -64,4 +65,161 @@ fn render_suggestions() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn render_patterns() -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let patterns = list_patterns(&conn).context("failed to read patterns")?;
+
+    if patterns.is_empty() {
+        println!("No patterns stored.");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = patterns
+        .into_iter()
+        .map(|pattern| {
+            vec![
+                render_pattern_name(&pattern.signature),
+                pattern.count.to_string(),
+                render_pattern_example(&pattern.canonical_summary),
+            ]
+        })
+        .collect();
+    print_table(&["pattern_id", "runs", "example"], &rows);
+    Ok(())
+}
+
+fn render_suggestions_table() -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let suggestions = list_suggestions(&conn).context("failed to read suggestions")?;
+
+    if suggestions.is_empty() {
+        println!("No suggestions stored.");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = suggestions
+        .into_iter()
+        .map(|suggestion| {
+            vec![
+                suggestion.suggestion_id.to_string(),
+                render_pattern_name(&suggestion.signature),
+                suggestion.count.to_string(),
+                suggestion.proposal_text,
+            ]
+        })
+        .collect();
+    print_table(&["suggestion_id", "pattern", "runs", "description"], &rows);
+    Ok(())
+}
+
+fn render_sessions() -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let sessions = list_recent_sessions(&conn, 20).context("failed to read sessions")?;
+
+    if sessions.is_empty() {
+        println!("No sessions stored.");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = sessions
+        .into_iter()
+        .map(|session| {
+            vec![
+                session.session_id.to_string(),
+                session.event_count.to_string(),
+                format_duration(session.duration_ms),
+            ]
+        })
+        .collect();
+    print_table(&["session_id", "events", "duration"], &rows);
+    Ok(())
+}
+
+fn open_cli_database() -> anyhow::Result<rusqlite::Connection> {
+    let db_path = std::env::var("FLOWD_DB_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Config::default().database_path);
+    open_database(&db_path).with_context(|| format!("failed to open database at {db_path}"))
+}
+
+fn render_pattern_name(signature: &str) -> String {
+    let mut groups = Vec::new();
+    for group in signature
+        .split("->")
+        .map(|part| part.split(':').nth(1).unwrap_or("file").replace('-', "_"))
+    {
+        if groups.last() != Some(&group) {
+            groups.push(group);
+        }
+    }
+    groups.push("workflow".to_string());
+    groups.join("_")
+}
+
+fn render_pattern_example(summary: &str) -> String {
+    summary
+        .split(" -> ")
+        .map(render_action_label)
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+fn format_duration(duration_ms: i64) -> String {
+    if duration_ms % 1000 == 0 {
+        format!("{}s", duration_ms / 1000)
+    } else {
+        format!("{duration_ms}ms")
+    }
+}
+
+fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
+    for row in rows {
+        for (index, value) in row.iter().enumerate() {
+            widths[index] = widths[index].max(value.len());
+        }
+    }
+
+    println!("{}", format_row(headers.iter().copied(), &widths));
+    println!(
+        "{}",
+        widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("-+-")
+    );
+    for row in rows {
+        println!("{}", format_row(row.iter(), &widths));
+    }
+}
+
+fn format_row<'a, I, T>(values: I, widths: &[usize]) -> String
+where
+    I: IntoIterator<Item = T>,
+    T: Display,
+{
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| format!("{value:<width$}", width = widths[index]))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_action_label(action: &str) -> String {
+    let normalized = action.strip_suffix("File").unwrap_or(action);
+    let mut label = String::new();
+
+    for (index, ch) in normalized.chars().enumerate() {
+        if ch.is_uppercase() && index > 0 {
+            label.push(' ');
+        }
+        label.push(ch.to_ascii_lowercase());
+    }
+
+    label
 }
