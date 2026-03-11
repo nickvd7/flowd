@@ -16,7 +16,8 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
             action_type TEXT NOT NULL,
             app TEXT,
             target TEXT,
-            metadata_json TEXT NOT NULL
+            metadata_json TEXT NOT NULL,
+            raw_event_id INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -65,7 +66,32 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
             undo_payload_json TEXT
         );
         "#,
-    )
+    )?;
+
+    ensure_normalized_events_raw_event_id_column(conn)?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_normalized_events_raw_event_id ON normalized_events(raw_event_id) WHERE raw_event_id IS NOT NULL",
+        [],
+    )?;
+
+    Ok(())
+}
+
+fn ensure_normalized_events_raw_event_id_column(conn: &Connection) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(normalized_events)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+
+    for column in columns {
+        if column? == "raw_event_id" {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        "ALTER TABLE normalized_events ADD COLUMN raw_event_id INTEGER",
+        [],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

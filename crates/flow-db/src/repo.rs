@@ -1,4 +1,5 @@
-use flow_core::events::{NormalizedEvent, RawEvent};
+use chrono::{DateTime, Utc};
+use flow_core::events::{EventSource, NormalizedEvent, RawEvent};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
@@ -11,6 +12,12 @@ pub struct StoredSuggestion {
     pub canonical_summary: String,
     pub proposal_text: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredRawEvent {
+    pub id: i64,
+    pub event: RawEvent,
 }
 
 pub fn insert_raw_event(conn: &Connection, event: &RawEvent) -> rusqlite::Result<usize> {
@@ -29,7 +36,7 @@ pub fn insert_normalized_event(
     event: &NormalizedEvent,
 ) -> rusqlite::Result<usize> {
     conn.execute(
-        "INSERT INTO normalized_events (ts, action_type, app, target, metadata_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO normalized_events (ts, action_type, app, target, metadata_json, raw_event_id) VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
         params![
             event.ts.to_rfc3339(),
             format!("{:?}", event.action_type),
@@ -46,6 +53,61 @@ pub fn insert_normalized_event_record(
 ) -> rusqlite::Result<i64> {
     insert_normalized_event(conn, event)?;
     Ok(conn.last_insert_rowid())
+}
+
+pub fn insert_normalized_event_for_raw_event(
+    conn: &Connection,
+    raw_event_id: i64,
+    event: &NormalizedEvent,
+) -> rusqlite::Result<bool> {
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO normalized_events (ts, action_type, app, target, metadata_json, raw_event_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            event.ts.to_rfc3339(),
+            format!("{:?}", event.action_type),
+            event.app,
+            event.target,
+            serde_json::to_string(&event.metadata).unwrap(),
+            raw_event_id,
+        ],
+    )?;
+
+    Ok(inserted == 1)
+}
+
+pub fn list_pending_file_raw_events(conn: &Connection) -> rusqlite::Result<Vec<StoredRawEvent>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT raw_events.id, raw_events.ts, raw_events.source, raw_events.payload_json
+        FROM raw_events
+        LEFT JOIN normalized_events ON normalized_events.raw_event_id = raw_events.id
+        WHERE raw_events.source = ?1
+            AND normalized_events.raw_event_id IS NULL
+            AND (
+                raw_events.payload_json LIKE '%"kind":"create"%'
+                OR raw_events.payload_json LIKE '%"kind":"rename"%'
+                OR raw_events.payload_json LIKE '%"kind":"move"%'
+            )
+        ORDER BY raw_events.id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([format!("{:?}", EventSource::FileWatcher)], |row| {
+        let ts: String = row.get(1)?;
+        let source: String = row.get(2)?;
+        let payload_json: String = row.get(3)?;
+
+        Ok(StoredRawEvent {
+            id: row.get(0)?,
+            event: RawEvent {
+                ts: parse_timestamp(&ts)?,
+                source: parse_event_source(&source)?,
+                payload: parse_json_value(&payload_json)?,
+            },
+        })
+    })?;
+
+    rows.collect()
 }
 
 pub fn insert_session(
@@ -147,6 +209,43 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
     rows.collect()
 }
 
+fn parse_timestamp(value: &str) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                value.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+}
+
+fn parse_event_source(value: &str) -> rusqlite::Result<EventSource> {
+    match value {
+        "FileWatcher" => Ok(EventSource::FileWatcher),
+        "Clipboard" => Ok(EventSource::Clipboard),
+        "Terminal" => Ok(EventSource::Terminal),
+        "ActiveWindow" => Ok(EventSource::ActiveWindow),
+        "Browser" => Ok(EventSource::Browser),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            value.len(),
+            rusqlite::types::Type::Text,
+            format!("unsupported event source: {value}").into(),
+        )),
+    }
+}
+
+fn parse_json_value(value: &str) -> rusqlite::Result<Value> {
+    serde_json::from_str(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            value.len(),
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +342,65 @@ mod tests {
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].count, 2);
         assert!(suggestions[0].proposal_text.contains("invoice"));
+    }
+
+    #[test]
+    fn lists_pending_file_raw_events_without_normalized_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let pending_raw =
+            synthetic_file_event(Utc::now(), FileEventKind::Create, "/tmp/report.txt", None);
+        let completed_raw = synthetic_file_event(
+            Utc::now(),
+            FileEventKind::Move,
+            "/tmp/archive/report.txt",
+            Some("/tmp/report.txt".to_string()),
+        );
+
+        insert_raw_event(&conn, &pending_raw).unwrap();
+        insert_raw_event(&conn, &completed_raw).unwrap();
+        let completed_raw_id = conn.last_insert_rowid();
+        let normalized = normalize(&completed_raw).unwrap();
+        insert_normalized_event_for_raw_event(&conn, completed_raw_id, &normalized).unwrap();
+
+        let pending = list_pending_file_raw_events(&conn).unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event.ts, pending_raw.ts);
+        assert_eq!(pending[0].event.source, pending_raw.source);
+        assert_eq!(pending[0].event.payload, pending_raw.payload);
+    }
+
+    #[test]
+    fn ignores_duplicate_normalized_rows_for_the_same_raw_event() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let raw_event = synthetic_file_event(
+            Utc::now(),
+            FileEventKind::Rename,
+            "/tmp/report-final.txt",
+            Some("/tmp/report.txt".to_string()),
+        );
+
+        insert_raw_event(&conn, &raw_event).unwrap();
+        let raw_event_id = conn.last_insert_rowid();
+        let normalized = normalize(&raw_event).unwrap();
+
+        let first_insert =
+            insert_normalized_event_for_raw_event(&conn, raw_event_id, &normalized).unwrap();
+        let second_insert =
+            insert_normalized_event_for_raw_event(&conn, raw_event_id, &normalized).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM normalized_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert!(first_insert);
+        assert!(!second_insert);
+        assert_eq!(count, 1);
     }
 }
