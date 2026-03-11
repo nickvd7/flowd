@@ -1,13 +1,17 @@
 use anyhow::{Context, Result};
-use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
+use chrono::{DateTime, Duration, Utc};
+use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path, FileEvent};
 use flow_core::config::Config;
 use flow_core::events::RawEvent;
-use flow_db::{migrations::run_migrations, repo::insert_raw_event};
+use flow_db::{open_database as open_sqlite_database, repo::insert_raw_event};
 use rusqlite::Connection;
 use std::{
+    collections::VecDeque,
     env,
     path::{Path, PathBuf},
 };
+
+const FILE_EVENT_DEDUP_WINDOW_MS: i64 = 500;
 
 fn main() {
     if let Err(error) = run() {
@@ -21,6 +25,8 @@ fn run() -> Result<()> {
     let observed_paths = resolve_observed_paths(&config)?;
     let conn = open_database(&config).context("failed to initialize daemon database")?;
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
+    let mut deduper =
+        RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
 
     for path in &observed_paths {
         watch_path(&mut watcher, path)
@@ -32,6 +38,10 @@ fn run() -> Result<()> {
         match result {
             Ok(event) => {
                 for file_event in event_to_file_events(&event) {
+                    if !deduper.should_emit(&file_event) {
+                        continue;
+                    }
+
                     let raw_event = file_event.into_raw_event();
                     persist_raw_event(&conn, &raw_event)
                         .context("failed to persist raw filesystem event")?;
@@ -77,10 +87,7 @@ fn resolve_observed_paths(config: &Config) -> Result<Vec<PathBuf>> {
 
 fn open_database(config: &Config) -> Result<Connection> {
     let db_path = expand_home(&config.database_path);
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("failed to open database at {}", db_path.display()))?;
-    run_migrations(&conn).context("failed to run database migrations")?;
-    Ok(conn)
+    open_sqlite_database(&db_path)
 }
 
 fn persist_raw_event(conn: &Connection, raw_event: &RawEvent) -> Result<()> {
@@ -106,10 +113,77 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentFileEvent {
+    ts: DateTime<Utc>,
+    key: RecentFileEventKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentFileEventKey {
+    kind: String,
+    path: String,
+    from_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct RecentFileEventDeduper {
+    window: Duration,
+    recent_events: VecDeque<RecentFileEvent>,
+}
+
+impl RecentFileEventDeduper {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            recent_events: VecDeque::new(),
+        }
+    }
+
+    fn should_emit(&mut self, event: &FileEvent) -> bool {
+        self.prune(event.ts);
+
+        let candidate = RecentFileEvent::from_file_event(event);
+        if self
+            .recent_events
+            .iter()
+            .any(|recent| recent.key == candidate.key)
+        {
+            return false;
+        }
+
+        self.recent_events.push_back(candidate);
+        true
+    }
+
+    fn prune(&mut self, now: DateTime<Utc>) {
+        while let Some(oldest) = self.recent_events.front() {
+            if now.signed_duration_since(oldest.ts) <= self.window {
+                break;
+            }
+
+            self.recent_events.pop_front();
+        }
+    }
+}
+
+impl RecentFileEvent {
+    fn from_file_event(event: &FileEvent) -> Self {
+        Self {
+            ts: event.ts,
+            key: RecentFileEventKey {
+                kind: format!("{:?}", event.kind),
+                path: event.path.clone(),
+                from_path: event.from_path.clone(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use flow_adapters::file_watcher::{synthetic_file_event, FileEventKind};
     use flow_core::events::EventSource;
     use tempfile::tempdir;
@@ -170,5 +244,67 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&payload_json).unwrap(),
             raw_event.payload
         );
+    }
+
+    #[test]
+    fn suppresses_duplicate_file_events_within_window() {
+        let ts = Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap();
+        let mut deduper =
+            RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+        let first = FileEvent {
+            ts,
+            kind: FileEventKind::Rename,
+            path: "/tmp/report-final.txt".to_string(),
+            from_path: Some("/tmp/report.txt".to_string()),
+        };
+        let duplicate = FileEvent {
+            ts: ts + Duration::milliseconds(200),
+            ..first.clone()
+        };
+
+        assert!(deduper.should_emit(&first));
+        assert!(!deduper.should_emit(&duplicate));
+    }
+
+    #[test]
+    fn keeps_matching_file_events_outside_window() {
+        let ts = Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap();
+        let mut deduper =
+            RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+        let first = FileEvent {
+            ts,
+            kind: FileEventKind::Create,
+            path: "/tmp/report.txt".to_string(),
+            from_path: None,
+        };
+        let later = FileEvent {
+            ts: ts + Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS + 1),
+            ..first.clone()
+        };
+
+        assert!(deduper.should_emit(&first));
+        assert!(deduper.should_emit(&later));
+    }
+
+    #[test]
+    fn keeps_events_with_different_sources_inside_window() {
+        let ts = Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap();
+        let mut deduper =
+            RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+        let first = FileEvent {
+            ts,
+            kind: FileEventKind::Move,
+            path: "/tmp/archive/report.txt".to_string(),
+            from_path: Some("/tmp/report.txt".to_string()),
+        };
+        let second = FileEvent {
+            ts: ts + Duration::milliseconds(200),
+            kind: FileEventKind::Move,
+            path: "/tmp/archive/report.txt".to_string(),
+            from_path: Some("/tmp/report-draft.txt".to_string()),
+        };
+
+        assert!(deduper.should_emit(&first));
+        assert!(deduper.should_emit(&second));
     }
 }

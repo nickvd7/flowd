@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use flow_core::events::{EventSource, RawEvent};
 use notify::{
-    event::{CreateKind, ModifyKind, RenameMode},
+    event::{CreateKind, DataChange, ModifyKind, RenameMode},
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use serde::{Deserialize, Serialize};
@@ -62,18 +62,7 @@ pub fn event_to_file_events(event: &Event) -> Vec<FileEvent> {
     let ts = Utc::now();
 
     match &event.kind {
-        EventKind::Create(CreateKind::File) | EventKind::Create(CreateKind::Any) => event
-            .paths
-            .iter()
-            .filter(|path| is_regular_file_path(path))
-            .filter(|path| !should_ignore_path(path))
-            .map(|path| FileEvent {
-                ts,
-                kind: FileEventKind::Create,
-                path: path.display().to_string(),
-                from_path: None,
-            })
-            .collect(),
+        kind if is_create_like_kind(kind) => create_events_from_paths(ts, &event.paths),
         EventKind::Modify(ModifyKind::Name(rename_mode)) => {
             rename_event_to_file_event(ts, rename_mode, &event.paths)
                 .into_iter()
@@ -83,15 +72,38 @@ pub fn event_to_file_events(event: &Event) -> Vec<FileEvent> {
     }
 }
 
+fn create_events_from_paths(ts: DateTime<Utc>, paths: &[PathBuf]) -> Vec<FileEvent> {
+    paths
+        .iter()
+        .filter(|path| is_file_like_path(path))
+        .filter(|path| !should_ignore_path(path))
+        .map(|path| FileEvent {
+            ts,
+            kind: FileEventKind::Create,
+            path: path.display().to_string(),
+            from_path: None,
+        })
+        .collect()
+}
+
+fn is_create_like_kind(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(CreateKind::File)
+            | EventKind::Create(CreateKind::Any)
+            | EventKind::Modify(ModifyKind::Any)
+            | EventKind::Modify(ModifyKind::Data(DataChange::Any))
+            | EventKind::Modify(ModifyKind::Data(DataChange::Content))
+            | EventKind::Modify(ModifyKind::Data(DataChange::Size))
+            | EventKind::Modify(ModifyKind::Data(DataChange::Other))
+    )
+}
+
 fn rename_event_to_file_event(
     ts: DateTime<Utc>,
     rename_mode: &RenameMode,
     paths: &[PathBuf],
 ) -> Option<FileEvent> {
-    let [from_path, to_path] = paths else {
-        return None;
-    };
-
     if !matches!(
         rename_mode,
         RenameMode::Any | RenameMode::Both | RenameMode::From | RenameMode::To | RenameMode::Other
@@ -99,35 +111,57 @@ fn rename_event_to_file_event(
         return None;
     }
 
-    if !is_regular_file_path(to_path)
-        || should_ignore_path(from_path)
-        || should_ignore_path(to_path)
-    {
-        return None;
+    match paths {
+        [from_path, to_path] => {
+            if !is_file_like_path(to_path)
+                || should_ignore_path(from_path)
+                || should_ignore_path(to_path)
+            {
+                return None;
+            }
+
+            let kind = if same_parent(from_path, to_path) {
+                FileEventKind::Rename
+            } else {
+                FileEventKind::Move
+            };
+
+            Some(FileEvent {
+                ts,
+                kind,
+                path: to_path.display().to_string(),
+                from_path: Some(from_path.display().to_string()),
+            })
+        }
+        [path]
+            if matches!(
+                rename_mode,
+                RenameMode::Any | RenameMode::To | RenameMode::Other
+            ) =>
+        {
+            if !is_file_like_path(path) || should_ignore_path(path) {
+                return None;
+            }
+
+            Some(FileEvent {
+                ts,
+                kind: FileEventKind::Rename,
+                path: path.display().to_string(),
+                from_path: None,
+            })
+        }
+        _ => None,
     }
-
-    let kind = if same_parent(from_path, to_path) {
-        FileEventKind::Rename
-    } else {
-        FileEventKind::Move
-    };
-
-    Some(FileEvent {
-        ts,
-        kind,
-        path: to_path.display().to_string(),
-        from_path: Some(from_path.display().to_string()),
-    })
 }
 
 fn same_parent(from_path: &Path, to_path: &Path) -> bool {
     from_path.parent() == to_path.parent()
 }
 
-fn is_regular_file_path(path: &Path) -> bool {
+fn is_file_like_path(path: &Path) -> bool {
     match path.metadata() {
-        Ok(metadata) => metadata.is_file(),
-        Err(_) => false,
+        Ok(metadata) => !metadata.is_dir(),
+        Err(_) => true,
     }
 }
 
@@ -178,7 +212,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use notify::{
-        event::{ModifyKind, RenameMode},
+        event::{DataChange, ModifyKind, RenameMode},
         Event, EventKind,
     };
     use std::fs;
@@ -218,6 +252,23 @@ mod tests {
     }
 
     #[test]
+    fn converts_create_event_when_metadata_is_not_yet_available() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("report.txt");
+        let event = Event {
+            kind: EventKind::Create(CreateKind::File),
+            paths: vec![path.clone()],
+            attrs: Default::default(),
+        };
+
+        let file_events = event_to_file_events(&event);
+
+        assert_eq!(file_events.len(), 1);
+        assert_eq!(file_events[0].kind, FileEventKind::Create);
+        assert_eq!(file_events[0].path, path.display().to_string());
+    }
+
+    #[test]
     fn ignores_hidden_and_temporary_files() {
         let dir = tempdir().unwrap();
         let hidden_path = dir.path().join(".report.txt");
@@ -238,6 +289,23 @@ mod tests {
 
         assert!(event_to_file_events(&hidden_event).is_empty());
         assert!(event_to_file_events(&temp_event).is_empty());
+    }
+
+    #[test]
+    fn converts_modify_data_event_for_visible_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("report.txt");
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![path.clone()],
+            attrs: Default::default(),
+        };
+
+        let file_events = event_to_file_events(&event);
+
+        assert_eq!(file_events.len(), 1);
+        assert_eq!(file_events[0].kind, FileEventKind::Create);
+        assert_eq!(file_events[0].path, path.display().to_string());
     }
 
     #[test]
@@ -262,6 +330,24 @@ mod tests {
             Some(from_path.to_str().unwrap())
         );
         assert_eq!(file_events[0].path, to_path.display().to_string());
+    }
+
+    #[test]
+    fn classifies_single_path_rename_event_as_rename() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("report-final.txt");
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+            paths: vec![path.clone()],
+            attrs: Default::default(),
+        };
+
+        let file_events = event_to_file_events(&event);
+
+        assert_eq!(file_events.len(), 1);
+        assert_eq!(file_events[0].kind, FileEventKind::Rename);
+        assert_eq!(file_events[0].from_path, None);
+        assert_eq!(file_events[0].path, path.display().to_string());
     }
 
     #[test]
