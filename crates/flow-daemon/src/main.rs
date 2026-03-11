@@ -5,7 +5,10 @@ use flow_core::config::Config;
 use flow_core::events::RawEvent;
 use flow_db::{
     open_database as open_sqlite_database,
-    repo::{insert_normalized_event_for_raw_event, insert_raw_event, list_pending_file_raw_events},
+    repo::{
+        insert_normalized_event_for_raw_event, insert_raw_event, list_pending_file_raw_events,
+        refresh_patterns_and_suggestions,
+    },
 };
 use flow_patterns::normalize::normalize;
 use rusqlite::Connection;
@@ -16,6 +19,7 @@ use std::{
 };
 
 const FILE_EVENT_DEDUP_WINDOW_MS: i64 = 500;
+const SESSION_INACTIVITY_SECS: i64 = 300;
 
 fn main() {
     if let Err(error) = run() {
@@ -27,9 +31,10 @@ fn main() {
 fn run() -> Result<()> {
     let config = load_config().context("failed to load daemon config")?;
     let observed_paths = resolve_observed_paths(&config)?;
-    let conn = open_database(&config).context("failed to initialize daemon database")?;
+    let mut conn = open_database(&config).context("failed to initialize daemon database")?;
     normalize_pending_file_raw_events(&conn)
         .context("failed to normalize pending raw file events")?;
+    refresh_live_patterns(&mut conn).context("failed to refresh live pattern data")?;
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
     let mut deduper =
         RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
@@ -53,6 +58,8 @@ fn run() -> Result<()> {
                         .context("failed to persist raw filesystem event")?;
                     normalize_pending_file_raw_events(&conn)
                         .context("failed to normalize raw filesystem events")?;
+                    refresh_live_patterns(&mut conn)
+                        .context("failed to refresh live pattern data")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
             }
@@ -115,6 +122,12 @@ fn normalize_pending_file_raw_events(conn: &Connection) -> Result<()> {
             .context("failed to insert normalized event")?;
     }
 
+    Ok(())
+}
+
+fn refresh_live_patterns(conn: &mut Connection) -> Result<()> {
+    refresh_patterns_and_suggestions(conn, SESSION_INACTIVITY_SECS)
+        .context("failed to rebuild sessions, patterns, and suggestions")?;
     Ok(())
 }
 
@@ -307,6 +320,101 @@ mod tests {
 
         assert_eq!(count, 1);
         assert_eq!(raw_event_id, 1);
+    }
+
+    #[test]
+    fn refreshes_patterns_from_persisted_normalized_events() {
+        let dir = tempdir().unwrap();
+        let config = Config {
+            database_path: dir.path().join("flowd.db").display().to_string(),
+            ..Config::default()
+        };
+        let mut conn = open_database(&config).unwrap();
+
+        let events = [
+            synthetic_file_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 9, 0, 0).unwrap(),
+                FileEventKind::Create,
+                dir.path().join("invoice-1001.pdf").display().to_string(),
+                None,
+            ),
+            synthetic_file_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 9, 0, 20).unwrap(),
+                FileEventKind::Rename,
+                dir.path()
+                    .join("invoice-1001-reviewed.pdf")
+                    .display()
+                    .to_string(),
+                Some(dir.path().join("invoice-1001.pdf").display().to_string()),
+            ),
+            synthetic_file_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 9, 0, 40).unwrap(),
+                FileEventKind::Move,
+                dir.path()
+                    .join("archive")
+                    .join("invoice-1001-reviewed.pdf")
+                    .display()
+                    .to_string(),
+                Some(
+                    dir.path()
+                        .join("invoice-1001-reviewed.pdf")
+                        .display()
+                        .to_string(),
+                ),
+            ),
+            synthetic_file_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap(),
+                FileEventKind::Create,
+                dir.path().join("invoice-1002.pdf").display().to_string(),
+                None,
+            ),
+            synthetic_file_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 20).unwrap(),
+                FileEventKind::Rename,
+                dir.path()
+                    .join("invoice-1002-reviewed.pdf")
+                    .display()
+                    .to_string(),
+                Some(dir.path().join("invoice-1002.pdf").display().to_string()),
+            ),
+            synthetic_file_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 40).unwrap(),
+                FileEventKind::Move,
+                dir.path()
+                    .join("archive")
+                    .join("invoice-1002-reviewed.pdf")
+                    .display()
+                    .to_string(),
+                Some(
+                    dir.path()
+                        .join("invoice-1002-reviewed.pdf")
+                        .display()
+                        .to_string(),
+                ),
+            ),
+        ];
+
+        for event in events {
+            persist_raw_event(&conn, &event).unwrap();
+        }
+
+        normalize_pending_file_raw_events(&conn).unwrap();
+        refresh_live_patterns(&mut conn).unwrap();
+        refresh_live_patterns(&mut conn).unwrap();
+
+        let pattern_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))
+            .unwrap();
+        let suggestion_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM suggestions", [], |row| row.get(0))
+            .unwrap();
+        let repeats: i64 = conn
+            .query_row("SELECT count FROM patterns LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(pattern_count, 1);
+        assert_eq!(suggestion_count, 1);
+        assert_eq!(repeats, 2);
     }
 
     #[test]
