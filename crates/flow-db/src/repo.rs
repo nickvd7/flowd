@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use flow_core::events::{ActionType, EventSource, NormalizedEvent, RawEvent};
-use flow_patterns::{detect::detect_repeated_patterns, sessions::split_into_sessions};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
@@ -14,6 +13,16 @@ pub struct StoredSuggestion {
     pub canonical_summary: String,
     pub proposal_text: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SuggestionDetails {
+    pub suggestion_id: i64,
+    pub pattern_id: i64,
+    pub status: String,
+    pub signature: String,
+    pub canonical_summary: String,
+    pub proposal_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +51,32 @@ pub struct StoredSession {
     pub session_id: i64,
     pub event_count: usize,
     pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAutomation {
+    pub automation_id: i64,
+    pub suggestion_id: Option<i64>,
+    pub status: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredAutomationSpec {
+    pub automation_id: i64,
+    pub suggestion_id: Option<i64>,
+    pub status: String,
+    pub summary: String,
+    pub spec_yaml: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomationRunRecord<'a> {
+    pub automation_id: i64,
+    pub started_at: &'a str,
+    pub finished_at: &'a str,
+    pub result: &'a str,
+    pub undo_payload_json: Option<&'a str>,
 }
 
 pub fn insert_raw_event(conn: &Connection, event: &RawEvent) -> rusqlite::Result<usize> {
@@ -163,55 +198,6 @@ pub fn list_normalized_events(conn: &Connection) -> rusqlite::Result<Vec<StoredN
     rows.collect()
 }
 
-pub fn refresh_patterns_and_suggestions(
-    conn: &mut Connection,
-    inactivity_secs: i64,
-) -> rusqlite::Result<()> {
-    let stored_events = list_normalized_events(conn)?;
-    let normalized_events: Vec<_> = stored_events
-        .iter()
-        .map(|stored| stored.event.clone())
-        .collect();
-    let sessions = split_into_sessions(&normalized_events, inactivity_secs);
-    let patterns = detect_repeated_patterns(&sessions);
-    let created_at = Utc::now().to_rfc3339();
-
-    let tx = conn.transaction()?;
-    tx.execute("DELETE FROM suggestions", [])?;
-    tx.execute("DELETE FROM patterns", [])?;
-    tx.execute("DELETE FROM session_events", [])?;
-    tx.execute("DELETE FROM sessions", [])?;
-
-    let mut offset = 0usize;
-    for session in &sessions {
-        let next_offset = offset + session.events.len();
-        let event_ids: Vec<_> = stored_events[offset..next_offset]
-            .iter()
-            .map(|stored| stored.id)
-            .collect();
-        insert_session(
-            &tx,
-            &session.start_ts.to_rfc3339(),
-            &session.end_ts.to_rfc3339(),
-            &event_ids,
-        )?;
-        offset = next_offset;
-    }
-
-    for pattern in patterns {
-        let pattern_id = insert_pattern(
-            &tx,
-            &pattern.signature,
-            pattern.count,
-            pattern.avg_duration_ms,
-            &pattern.canonical_summary,
-        )?;
-        insert_suggestion(&tx, pattern_id, &pattern.proposal_text, &created_at)?;
-    }
-
-    tx.commit()
-}
-
 pub fn insert_session(
     conn: &Connection,
     start_ts: &str,
@@ -246,6 +232,14 @@ pub fn insert_pattern(
         params![signature, count as i64, avg_duration_ms, canonical_summary, count as f64],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+pub fn clear_analysis_state(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM suggestions", [])?;
+    conn.execute("DELETE FROM patterns", [])?;
+    conn.execute("DELETE FROM session_events", [])?;
+    conn.execute("DELETE FROM sessions", [])?;
+    Ok(())
 }
 
 pub fn insert_suggestion(
@@ -313,6 +307,172 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
     rows.collect()
 }
 
+pub fn get_suggestion(
+    conn: &Connection,
+    suggestion_id: i64,
+) -> rusqlite::Result<Option<SuggestionDetails>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            suggestions.id,
+            suggestions.pattern_id,
+            suggestions.status,
+            patterns.signature,
+            COALESCE(patterns.canonical_summary, ''),
+            suggestions.proposal_json
+        FROM suggestions
+        INNER JOIN patterns ON patterns.id = suggestions.pattern_id
+        WHERE suggestions.id = ?1
+        "#,
+    )?;
+
+    let row = statement.query_row([suggestion_id], |row| {
+        let proposal_json: String = row.get(5)?;
+        let proposal: Value = serde_json::from_str(&proposal_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                proposal_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+
+        Ok(SuggestionDetails {
+            suggestion_id: row.get(0)?,
+            pattern_id: row.get(1)?,
+            status: row.get(2)?,
+            signature: row.get(3)?,
+            canonical_summary: row.get(4)?,
+            proposal_text: proposal
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        })
+    });
+
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn set_suggestion_status(
+    conn: &Connection,
+    suggestion_id: i64,
+    status: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE suggestions SET status = ?2 WHERE id = ?1",
+        params![suggestion_id, status],
+    )
+}
+
+pub fn insert_automation(
+    conn: &Connection,
+    suggestion_id: i64,
+    spec_yaml: &str,
+    state: &str,
+    summary: &str,
+    accepted_at: &str,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO automations (suggestion_id, spec_yaml, state, summary, accepted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![suggestion_id, spec_yaml, state, summary, accepted_at],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_automations(conn: &Connection) -> rusqlite::Result<Vec<StoredAutomation>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, suggestion_id, state, COALESCE(summary, '')
+        FROM automations
+        ORDER BY id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        Ok(StoredAutomation {
+            automation_id: row.get(0)?,
+            suggestion_id: row.get(1)?,
+            status: row.get(2)?,
+            summary: row.get(3)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn get_automation(
+    conn: &Connection,
+    automation_id: i64,
+) -> rusqlite::Result<Option<StoredAutomationSpec>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, suggestion_id, state, COALESCE(summary, ''), spec_yaml
+        FROM automations
+        WHERE id = ?1
+        "#,
+    )?;
+
+    let row = statement.query_row([automation_id], |row| {
+        Ok(StoredAutomationSpec {
+            automation_id: row.get(0)?,
+            suggestion_id: row.get(1)?,
+            status: row.get(2)?,
+            summary: row.get(3)?,
+            spec_yaml: row.get(4)?,
+        })
+    });
+
+    match row {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn insert_automation_run(
+    conn: &Connection,
+    record: &AutomationRunRecord<'_>,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO automation_runs (automation_id, started_at, finished_at, result, undo_payload_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            record.automation_id,
+            record.started_at,
+            record.finished_at,
+            record.result,
+            record.undo_payload_json
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn load_example_events_for_pattern(
+    conn: &Connection,
+    pattern_id: i64,
+) -> rusqlite::Result<Vec<NormalizedEvent>> {
+    let signature: String = conn.query_row(
+        "SELECT signature FROM patterns WHERE id = ?1",
+        [pattern_id],
+        |row| row.get(0),
+    )?;
+
+    let mut sessions = conn.prepare("SELECT id FROM sessions ORDER BY id ASC")?;
+    let session_ids = sessions.query_map([], |row| row.get::<_, i64>(0))?;
+
+    for session_id in session_ids {
+        let events = load_session_events(conn, session_id?)?;
+        if session_signature(&events) == signature {
+            return Ok(events);
+        }
+    }
+
+    Ok(Vec::new())
+}
+
 pub fn list_patterns(conn: &Connection) -> rusqlite::Result<Vec<StoredPattern>> {
     let mut statement = conn.prepare(
         r#"
@@ -335,10 +495,12 @@ pub fn list_patterns(conn: &Connection) -> rusqlite::Result<Vec<StoredPattern>> 
     rows.collect()
 }
 
-pub fn list_recent_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<StoredSession>> {
-    let limit = i64::try_from(limit).map_err(|error| {
-        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-    })?;
+pub fn list_recent_sessions(
+    conn: &Connection,
+    limit: usize,
+) -> rusqlite::Result<Vec<StoredSession>> {
+    let limit = i64::try_from(limit)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let mut statement = conn.prepare(
         r#"
         SELECT
@@ -421,6 +583,59 @@ fn parse_json_value(value: &str) -> rusqlite::Result<Value> {
     })
 }
 
+fn load_session_events(
+    conn: &Connection,
+    session_id: i64,
+) -> rusqlite::Result<Vec<NormalizedEvent>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            normalized_events.ts,
+            normalized_events.action_type,
+            normalized_events.app,
+            normalized_events.target,
+            normalized_events.metadata_json
+        FROM session_events
+        INNER JOIN normalized_events ON normalized_events.id = session_events.event_id
+        WHERE session_events.session_id = ?1
+        ORDER BY session_events.ord ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([session_id], |row| {
+        let ts: String = row.get(0)?;
+        let action_type: String = row.get(1)?;
+        let metadata_json: String = row.get(4)?;
+
+        Ok(NormalizedEvent {
+            ts: parse_timestamp(&ts)?,
+            action_type: parse_action_type(&action_type)?,
+            app: row.get(2)?,
+            target: row.get(3)?,
+            metadata: parse_json_value(&metadata_json)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+fn session_signature(events: &[NormalizedEvent]) -> String {
+    events
+        .iter()
+        .map(event_signature_part)
+        .collect::<Vec<_>>()
+        .join("->")
+}
+
+fn event_signature_part(event: &NormalizedEvent) -> String {
+    let group = event
+        .metadata
+        .get("file_group")
+        .and_then(|value| value.as_str())
+        .unwrap_or("file");
+    format!("{:?}:{group}", event.action_type)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,7 +643,9 @@ mod tests {
     use chrono::Utc;
     use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
     use flow_core::events::EventSource;
-    use flow_patterns::normalize::normalize;
+    use flow_patterns::{
+        detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -578,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_rebuilds_patterns_suggestions_and_sessions_without_duplicates() {
+    fn clear_analysis_state_removes_sessions_patterns_and_suggestions() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
 
@@ -594,33 +811,35 @@ mod tests {
             .collect();
         let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
 
-        for event in normalized.iter().take(3) {
-            insert_normalized_event_record(&conn, event).unwrap();
+        for session in split_into_sessions(&normalized, 300) {
+            let event_ids: Vec<_> = session
+                .events
+                .iter()
+                .map(|event| insert_normalized_event_record(&conn, event).unwrap())
+                .collect();
+            insert_session(
+                &conn,
+                &session.start_ts.to_rfc3339(),
+                &session.end_ts.to_rfc3339(),
+                &event_ids,
+            )
+            .unwrap();
         }
 
-        let mut conn = conn;
-        refresh_patterns_and_suggestions(&mut conn, 300).unwrap();
-
-        let initial_session_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        let created_at = Utc::now().to_rfc3339();
+        for pattern in detect_repeated_patterns(&split_into_sessions(&normalized, 300)) {
+            let pattern_id = insert_pattern(
+                &conn,
+                &pattern.signature,
+                pattern.count,
+                pattern.avg_duration_ms,
+                &pattern.canonical_summary,
+            )
             .unwrap();
-        let initial_pattern_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))
-            .unwrap();
-        let initial_suggestion_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM suggestions", [], |row| row.get(0))
-            .unwrap();
-
-        assert_eq!(initial_session_count, 1);
-        assert_eq!(initial_pattern_count, 0);
-        assert_eq!(initial_suggestion_count, 0);
-
-        for event in normalized.iter().skip(3) {
-            insert_normalized_event_record(&conn, event).unwrap();
+            insert_suggestion(&conn, pattern_id, &pattern.proposal_text, &created_at).unwrap();
         }
 
-        refresh_patterns_and_suggestions(&mut conn, 300).unwrap();
-        refresh_patterns_and_suggestions(&mut conn, 300).unwrap();
+        clear_analysis_state(&conn).unwrap();
 
         let session_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
@@ -634,14 +853,16 @@ mod tests {
         let suggestion_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM suggestions", [], |row| row.get(0))
             .unwrap();
-        let pattern_repeats: i64 = conn
-            .query_row("SELECT count FROM patterns LIMIT 1", [], |row| row.get(0))
+        let normalized_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM normalized_events", [], |row| {
+                row.get(0)
+            })
             .unwrap();
 
-        assert_eq!(session_count, 2);
-        assert_eq!(session_event_count, 6);
-        assert_eq!(pattern_count, 1);
-        assert_eq!(suggestion_count, 1);
-        assert_eq!(pattern_repeats, 2);
+        assert_eq!(session_count, 0);
+        assert_eq!(session_event_count, 0);
+        assert_eq!(pattern_count, 0);
+        assert_eq!(suggestion_count, 0);
+        assert_eq!(normalized_count, normalized.len() as i64);
     }
 }

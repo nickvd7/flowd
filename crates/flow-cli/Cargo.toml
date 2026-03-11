@@ -7,13 +7,16 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+chrono.workspace = true
 flow-core = { path = "../flow-core" }
 flow-db = { path = "../flow-db" }
+flow-dsl = { path = "../flow-dsl" }
+flow-exec = { path = "../flow-exec" }
 rusqlite.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 flow-adapters = { path = "../flow-adapters" }
 flow-patterns = { path = "../flow-patterns" }
-serde_json.workspace = true
 tempfile.workspace = true

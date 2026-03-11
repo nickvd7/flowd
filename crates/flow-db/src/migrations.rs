@@ -52,8 +52,10 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS automations (
             id INTEGER PRIMARY KEY,
+            suggestion_id INTEGER,
             spec_yaml TEXT NOT NULL,
             state TEXT NOT NULL,
+            summary TEXT,
             accepted_at TEXT
         );
 
@@ -69,6 +71,8 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     ensure_normalized_events_raw_event_id_column(conn)?;
+    ensure_automations_suggestion_id_column(conn)?;
+    ensure_automations_summary_column(conn)?;
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_normalized_events_raw_event_id ON normalized_events(raw_event_id) WHERE raw_event_id IS NOT NULL",
         [],
@@ -78,19 +82,48 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 fn ensure_normalized_events_raw_event_id_column(conn: &Connection) -> rusqlite::Result<()> {
-    let mut statement = conn.prepare("PRAGMA table_info(normalized_events)")?;
+    ensure_column_exists(
+        conn,
+        "normalized_events",
+        "raw_event_id",
+        "ALTER TABLE normalized_events ADD COLUMN raw_event_id INTEGER",
+    )
+}
+
+fn ensure_automations_suggestion_id_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "automations",
+        "suggestion_id",
+        "ALTER TABLE automations ADD COLUMN suggestion_id INTEGER",
+    )
+}
+
+fn ensure_automations_summary_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "automations",
+        "summary",
+        "ALTER TABLE automations ADD COLUMN summary TEXT",
+    )
+}
+
+fn ensure_column_exists(
+    conn: &Connection,
+    table: &str,
+    column_name: &str,
+    alter_sql: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
 
     for column in columns {
-        if column? == "raw_event_id" {
+        if column? == column_name {
             return Ok(());
         }
     }
 
-    conn.execute(
-        "ALTER TABLE normalized_events ADD COLUMN raw_event_id INTEGER",
-        [],
-    )?;
+    conn.execute(alter_sql, [])?;
     Ok(())
 }
 

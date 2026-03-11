@@ -19,6 +19,8 @@ pub struct AutomationSpec {
 pub struct Trigger {
     pub r#type: String,
     pub path: Option<String>,
+    pub extension: Option<String>,
+    pub name_contains: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

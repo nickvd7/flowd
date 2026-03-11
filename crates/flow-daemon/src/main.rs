@@ -1,19 +1,14 @@
+mod analysis;
+mod observation;
+
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
-use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path, FileEvent};
+use chrono::Duration;
+use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
 use flow_core::config::Config;
-use flow_core::events::RawEvent;
-use flow_db::{
-    open_database as open_sqlite_database,
-    repo::{
-        insert_normalized_event_for_raw_event, insert_raw_event, list_pending_file_raw_events,
-        refresh_patterns_and_suggestions,
-    },
-};
-use flow_patterns::normalize::normalize;
+use flow_db::open_database as open_sqlite_database;
+use observation::ObservationPipeline;
 use rusqlite::Connection;
 use std::{
-    collections::VecDeque,
     env,
     path::{Path, PathBuf},
 };
@@ -32,12 +27,13 @@ fn run() -> Result<()> {
     let config = load_config().context("failed to load daemon config")?;
     let observed_paths = resolve_observed_paths(&config)?;
     let mut conn = open_database(&config).context("failed to initialize daemon database")?;
-    normalize_pending_file_raw_events(&conn)
-        .context("failed to normalize pending raw file events")?;
-    refresh_live_patterns(&mut conn).context("failed to refresh live pattern data")?;
+
+    analysis::catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
+        .context("failed to catch up analysis state")?;
+
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
-    let mut deduper =
-        RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+    let mut observation =
+        ObservationPipeline::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
 
     for path in &observed_paths {
         watch_path(&mut watcher, path)
@@ -49,17 +45,15 @@ fn run() -> Result<()> {
         match result {
             Ok(event) => {
                 for file_event in event_to_file_events(&event) {
-                    if !deduper.should_emit(&file_event) {
+                    let Some(raw_event) = observation
+                        .accept(&conn, file_event)
+                        .context("failed during observation")?
+                    else {
                         continue;
-                    }
+                    };
 
-                    let raw_event = file_event.into_raw_event();
-                    persist_raw_event(&conn, &raw_event)
-                        .context("failed to persist raw filesystem event")?;
-                    normalize_pending_file_raw_events(&conn)
-                        .context("failed to normalize raw filesystem events")?;
-                    refresh_live_patterns(&mut conn)
-                        .context("failed to refresh live pattern data")?;
+                    analysis::catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
+                        .context("failed during analysis refresh")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
             }
@@ -105,32 +99,6 @@ fn open_database(config: &Config) -> Result<Connection> {
     open_sqlite_database(&db_path)
 }
 
-fn persist_raw_event(conn: &Connection, raw_event: &RawEvent) -> Result<()> {
-    insert_raw_event(conn, raw_event).context("failed to insert raw event")?;
-    Ok(())
-}
-
-fn normalize_pending_file_raw_events(conn: &Connection) -> Result<()> {
-    for raw_event in
-        list_pending_file_raw_events(conn).context("failed to load pending raw file events")?
-    {
-        let Some(normalized_event) = normalize(&raw_event.event) else {
-            continue;
-        };
-
-        insert_normalized_event_for_raw_event(conn, raw_event.id, &normalized_event)
-            .context("failed to insert normalized event")?;
-    }
-
-    Ok(())
-}
-
-fn refresh_live_patterns(conn: &mut Connection) -> Result<()> {
-    refresh_patterns_and_suggestions(conn, SESSION_INACTIVITY_SECS)
-        .context("failed to rebuild sessions, patterns, and suggestions")?;
-    Ok(())
-}
-
 fn expand_home(raw: &str) -> PathBuf {
     if raw == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(raw));
@@ -149,79 +117,13 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RecentFileEvent {
-    ts: DateTime<Utc>,
-    key: RecentFileEventKey,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RecentFileEventKey {
-    kind: String,
-    path: String,
-    from_path: Option<String>,
-}
-
-#[derive(Debug)]
-struct RecentFileEventDeduper {
-    window: Duration,
-    recent_events: VecDeque<RecentFileEvent>,
-}
-
-impl RecentFileEventDeduper {
-    fn new(window: Duration) -> Self {
-        Self {
-            window,
-            recent_events: VecDeque::new(),
-        }
-    }
-
-    fn should_emit(&mut self, event: &FileEvent) -> bool {
-        self.prune(event.ts);
-
-        let candidate = RecentFileEvent::from_file_event(event);
-        if self
-            .recent_events
-            .iter()
-            .any(|recent| recent.key == candidate.key)
-        {
-            return false;
-        }
-
-        self.recent_events.push_back(candidate);
-        true
-    }
-
-    fn prune(&mut self, now: DateTime<Utc>) {
-        while let Some(oldest) = self.recent_events.front() {
-            if now.signed_duration_since(oldest.ts) <= self.window {
-                break;
-            }
-
-            self.recent_events.pop_front();
-        }
-    }
-}
-
-impl RecentFileEvent {
-    fn from_file_event(event: &FileEvent) -> Self {
-        Self {
-            ts: event.ts,
-            key: RecentFileEventKey {
-                kind: format!("{:?}", event.kind),
-                path: event.path.clone(),
-                from_path: event.from_path.clone(),
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use flow_adapters::file_watcher::{synthetic_file_event, FileEventKind};
+    use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
     use flow_core::events::EventSource;
+    use observation::RecentFileEventDeduper;
     use tempfile::tempdir;
 
     #[test]
@@ -265,7 +167,7 @@ mod tests {
             None,
         );
 
-        persist_raw_event(&conn, &raw_event).unwrap();
+        flow_db::repo::insert_raw_event(&conn, &raw_event).unwrap();
 
         let (source, payload_json): (String, String) = conn
             .query_row(
@@ -301,9 +203,9 @@ mod tests {
             Some(dir.path().join("report.txt").display().to_string()),
         );
 
-        persist_raw_event(&conn, &raw_event).unwrap();
-        normalize_pending_file_raw_events(&conn).unwrap();
-        normalize_pending_file_raw_events(&conn).unwrap();
+        flow_db::repo::insert_raw_event(&conn, &raw_event).unwrap();
+        analysis::normalize_pending_raw_events(&conn).unwrap();
+        analysis::normalize_pending_raw_events(&conn).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM normalized_events", [], |row| {
@@ -395,12 +297,12 @@ mod tests {
         ];
 
         for event in events {
-            persist_raw_event(&conn, &event).unwrap();
+            flow_db::repo::insert_raw_event(&conn, &event).unwrap();
         }
 
-        normalize_pending_file_raw_events(&conn).unwrap();
-        refresh_live_patterns(&mut conn).unwrap();
-        refresh_live_patterns(&mut conn).unwrap();
+        analysis::normalize_pending_raw_events(&conn).unwrap();
+        analysis::rebuild_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
+        analysis::rebuild_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
 
         let pattern_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))

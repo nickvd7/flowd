@@ -247,9 +247,12 @@ dependencies = [
  "flow-adapters",
  "flow-core",
  "flow-db",
+ "flow-dsl",
+ "flow-exec",
  "flow-patterns",
  "rusqlite",
  "serde_json",
+ "serde_yaml",
  "tempfile",
 ]
 
@@ -307,7 +310,15 @@ name = "flow-exec"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "flow-core",
+ "flow-db",
  "flow-dsl",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
 ]
 
 [[package]]
