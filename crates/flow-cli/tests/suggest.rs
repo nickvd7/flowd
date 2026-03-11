@@ -1,12 +1,6 @@
-use chrono::Utc;
 use flow_adapters::file_watcher::FileEvent;
-use flow_db::{
-    migrations::run_migrations,
-    repo::{insert_normalized_event_record, insert_pattern, insert_session, insert_suggestion},
-};
-use flow_patterns::{
-    detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
-};
+use flow_db::{migrations::run_migrations, repo::insert_normalized_event_record};
+use flow_patterns::normalize::normalize;
 use rusqlite::Connection;
 use std::{path::Path, process::Command};
 
@@ -29,7 +23,7 @@ fn suggest_renders_detected_file_workflow() {
 }
 
 fn seed_database(db_path: &Path) {
-    let conn = Connection::open(db_path).unwrap();
+    let mut conn = Connection::open(db_path).unwrap();
     run_migrations(&conn).unwrap();
 
     let fixture_path = concat!(
@@ -43,38 +37,8 @@ fn seed_database(db_path: &Path) {
         .map(FileEvent::into_raw_event)
         .collect();
     let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
-    let sessions = split_into_sessions(&normalized, 300);
 
-    for session in &sessions {
-        let event_ids: Vec<_> = session
-            .events
-            .iter()
-            .map(|event| insert_normalized_event_record(&conn, event).unwrap())
-            .collect();
-        insert_session(
-            &conn,
-            &session.start_ts.to_rfc3339(),
-            &session.end_ts.to_rfc3339(),
-            &event_ids,
-        )
-        .unwrap();
-    }
-
-    for pattern in detect_repeated_patterns(&sessions) {
-        let pattern_id = insert_pattern(
-            &conn,
-            &pattern.signature,
-            pattern.count,
-            pattern.avg_duration_ms,
-            &pattern.canonical_summary,
-        )
-        .unwrap();
-        insert_suggestion(
-            &conn,
-            pattern_id,
-            &pattern.proposal_text,
-            &Utc::now().to_rfc3339(),
-        )
-        .unwrap();
+    for event in &normalized {
+        insert_normalized_event_record(&mut conn, event).unwrap();
     }
 }
