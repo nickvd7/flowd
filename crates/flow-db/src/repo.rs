@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredSuggestion {
+    pub suggestion_id: i64,
     pub pattern_id: i64,
     pub signature: String,
     pub count: usize,
@@ -25,6 +26,22 @@ pub struct StoredRawEvent {
 pub struct StoredNormalizedEvent {
     pub id: i64,
     pub event: NormalizedEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPattern {
+    pub pattern_id: i64,
+    pub signature: String,
+    pub count: usize,
+    pub avg_duration_ms: i64,
+    pub canonical_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSession {
+    pub session_id: i64,
+    pub event_count: usize,
+    pub duration_ms: i64,
 }
 
 pub fn insert_raw_event(conn: &Connection, event: &RawEvent) -> rusqlite::Result<usize> {
@@ -252,6 +269,7 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
     let mut statement = conn.prepare(
         r#"
         SELECT
+            suggestions.id,
             patterns.id,
             patterns.signature,
             patterns.count,
@@ -267,7 +285,7 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
     )?;
 
     let rows = statement.query_map([], |row| {
-        let proposal_json: String = row.get(5)?;
+        let proposal_json: String = row.get(6)?;
         let proposal: Value = serde_json::from_str(&proposal_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 proposal_json.len(),
@@ -277,17 +295,69 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
         })?;
 
         Ok(StoredSuggestion {
-            pattern_id: row.get(0)?,
-            signature: row.get(1)?,
-            count: row.get::<_, i64>(2)? as usize,
-            avg_duration_ms: row.get(3)?,
-            canonical_summary: row.get(4)?,
+            suggestion_id: row.get(0)?,
+            pattern_id: row.get(1)?,
+            signature: row.get(2)?,
+            count: row.get::<_, i64>(3)? as usize,
+            avg_duration_ms: row.get(4)?,
+            canonical_summary: row.get(5)?,
             proposal_text: proposal
                 .get("message")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            created_at: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn list_patterns(conn: &Connection) -> rusqlite::Result<Vec<StoredPattern>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, signature, count, avg_duration_ms, COALESCE(canonical_summary, '')
+        FROM patterns
+        ORDER BY count DESC, signature ASC, id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        Ok(StoredPattern {
+            pattern_id: row.get(0)?,
+            signature: row.get(1)?,
+            count: row.get::<_, i64>(2)? as usize,
+            avg_duration_ms: row.get(3)?,
+            canonical_summary: row.get(4)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn list_recent_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<StoredSession>> {
+    let limit = i64::try_from(limit).map_err(|error| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+    })?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            sessions.id,
+            COUNT(session_events.event_id) AS event_count,
+            ((strftime('%s', sessions.end_ts) - strftime('%s', sessions.start_ts)) * 1000) AS duration_ms
+        FROM sessions
+        LEFT JOIN session_events ON session_events.session_id = sessions.id
+        GROUP BY sessions.id, sessions.start_ts, sessions.end_ts
+        ORDER BY sessions.id DESC
+        LIMIT ?1
+        "#,
+    )?;
+
+    let rows = statement.query_map([limit], |row| {
+        Ok(StoredSession {
+            session_id: row.get(0)?,
+            event_count: row.get::<_, i64>(1)? as usize,
+            duration_ms: row.get(2)?,
         })
     })?;
 
