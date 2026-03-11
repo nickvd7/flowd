@@ -191,7 +191,7 @@ mod tests {
             database_path: dir.path().join("flowd.db").display().to_string(),
             ..Config::default()
         };
-        let conn = open_database(&config).unwrap();
+        let mut conn = open_database(&config).unwrap();
         let raw_event = synthetic_file_event(
             Utc::now(),
             FileEventKind::Move,
@@ -204,8 +204,8 @@ mod tests {
         );
 
         flow_db::repo::insert_raw_event(&conn, &raw_event).unwrap();
-        analysis::normalize_pending_raw_events(&conn).unwrap();
-        analysis::normalize_pending_raw_events(&conn).unwrap();
+        analysis::normalize_pending_raw_events(&mut conn).unwrap();
+        analysis::normalize_pending_raw_events(&mut conn).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM normalized_events", [], |row| {
@@ -300,7 +300,7 @@ mod tests {
             flow_db::repo::insert_raw_event(&conn, &event).unwrap();
         }
 
-        analysis::normalize_pending_raw_events(&conn).unwrap();
+        analysis::normalize_pending_raw_events(&mut conn).unwrap();
         analysis::rebuild_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
         analysis::rebuild_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
 

@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use flow_core::events::{ActionType, EventSource, NormalizedEvent, RawEvent};
+use flow_patterns::{detect::detect_repeated_patterns, sessions::split_into_sessions};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
+
+const DEFAULT_SESSION_INACTIVITY_SECS: i64 = 300;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredSuggestion {
@@ -90,10 +93,7 @@ pub fn insert_raw_event(conn: &Connection, event: &RawEvent) -> rusqlite::Result
     )
 }
 
-pub fn insert_normalized_event(
-    conn: &Connection,
-    event: &NormalizedEvent,
-) -> rusqlite::Result<usize> {
+fn insert_normalized_event_row(conn: &Connection, event: &NormalizedEvent) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO normalized_events (ts, action_type, app, target, metadata_json, raw_event_id) VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
         params![
@@ -107,14 +107,15 @@ pub fn insert_normalized_event(
 }
 
 pub fn insert_normalized_event_record(
-    conn: &Connection,
+    conn: &mut Connection,
     event: &NormalizedEvent,
 ) -> rusqlite::Result<i64> {
-    insert_normalized_event(conn, event)?;
+    insert_normalized_event_row(conn, event)?;
+    refresh_analysis_state(conn, DEFAULT_SESSION_INACTIVITY_SECS)?;
     Ok(conn.last_insert_rowid())
 }
 
-pub fn insert_normalized_event_for_raw_event(
+fn insert_normalized_event_for_raw_event_row(
     conn: &Connection,
     raw_event_id: i64,
     event: &NormalizedEvent,
@@ -132,6 +133,37 @@ pub fn insert_normalized_event_for_raw_event(
     )?;
 
     Ok(inserted == 1)
+}
+
+pub fn insert_normalized_event_for_raw_event(
+    conn: &mut Connection,
+    raw_event_id: i64,
+    event: &NormalizedEvent,
+) -> rusqlite::Result<bool> {
+    let inserted = insert_normalized_event_for_raw_event_row(conn, raw_event_id, event)?;
+    if inserted {
+        refresh_analysis_state(conn, DEFAULT_SESSION_INACTIVITY_SECS)?;
+    }
+    Ok(inserted)
+}
+
+pub fn insert_normalized_events_for_raw_events(
+    conn: &mut Connection,
+    records: &[(i64, NormalizedEvent)],
+) -> rusqlite::Result<usize> {
+    let mut inserted_count = 0usize;
+
+    for (raw_event_id, event) in records {
+        if insert_normalized_event_for_raw_event_row(conn, *raw_event_id, event)? {
+            inserted_count += 1;
+        }
+    }
+
+    if inserted_count > 0 {
+        refresh_analysis_state(conn, DEFAULT_SESSION_INACTIVITY_SECS)?;
+    }
+
+    Ok(inserted_count)
 }
 
 pub fn list_pending_file_raw_events(conn: &Connection) -> rusqlite::Result<Vec<StoredRawEvent>> {
@@ -239,6 +271,50 @@ pub fn clear_analysis_state(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM patterns", [])?;
     conn.execute("DELETE FROM session_events", [])?;
     conn.execute("DELETE FROM sessions", [])?;
+    Ok(())
+}
+
+pub fn refresh_analysis_state(conn: &mut Connection, inactivity_secs: i64) -> rusqlite::Result<()> {
+    let stored_events = list_normalized_events(conn)?;
+    let normalized_events: Vec<_> = stored_events
+        .iter()
+        .map(|stored| stored.event.clone())
+        .collect();
+    let sessions = split_into_sessions(&normalized_events, inactivity_secs);
+    let patterns = detect_repeated_patterns(&sessions);
+    let created_at = Utc::now().to_rfc3339();
+
+    let tx = conn.transaction()?;
+    clear_analysis_state(&tx)?;
+
+    let mut offset = 0usize;
+    for session in &sessions {
+        let next_offset = offset + session.events.len();
+        let event_ids: Vec<_> = stored_events[offset..next_offset]
+            .iter()
+            .map(|stored| stored.id)
+            .collect();
+        insert_session(
+            &tx,
+            &session.start_ts.to_rfc3339(),
+            &session.end_ts.to_rfc3339(),
+            &event_ids,
+        )?;
+        offset = next_offset;
+    }
+
+    for pattern in patterns {
+        let pattern_id = insert_pattern(
+            &tx,
+            &pattern.signature,
+            pattern.count,
+            pattern.avg_duration_ms,
+            &pattern.canonical_summary,
+        )?;
+        insert_suggestion(&tx, pattern_id, &pattern.proposal_text, &created_at)?;
+    }
+
+    tx.commit()?;
     Ok(())
 }
 
@@ -643,9 +719,7 @@ mod tests {
     use chrono::Utc;
     use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
     use flow_core::events::EventSource;
-    use flow_patterns::{
-        detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
-    };
+    use flow_patterns::normalize::normalize;
     use tempfile::tempdir;
 
     #[test]
@@ -679,7 +753,7 @@ mod tests {
 
     #[test]
     fn stores_and_reads_detected_suggestions() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
 
         let fixture_path = concat!(
@@ -693,39 +767,9 @@ mod tests {
             .map(FileEvent::into_raw_event)
             .collect();
         let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
-        let sessions = split_into_sessions(&normalized, 300);
 
-        for session in &sessions {
-            let event_ids: Vec<_> = session
-                .events
-                .iter()
-                .map(|event| insert_normalized_event_record(&conn, event).unwrap())
-                .collect();
-            insert_session(
-                &conn,
-                &session.start_ts.to_rfc3339(),
-                &session.end_ts.to_rfc3339(),
-                &event_ids,
-            )
-            .unwrap();
-        }
-
-        for pattern in detect_repeated_patterns(&sessions) {
-            let pattern_id = insert_pattern(
-                &conn,
-                &pattern.signature,
-                pattern.count,
-                pattern.avg_duration_ms,
-                &pattern.canonical_summary,
-            )
-            .unwrap();
-            insert_suggestion(
-                &conn,
-                pattern_id,
-                &pattern.proposal_text,
-                &Utc::now().to_rfc3339(),
-            )
-            .unwrap();
+        for event in &normalized {
+            insert_normalized_event_record(&mut conn, event).unwrap();
         }
 
         let suggestions = list_suggestions(&conn).unwrap();
@@ -735,8 +779,50 @@ mod tests {
     }
 
     #[test]
+    fn refreshes_suggestions_automatically_without_duplicates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/invoice_file_events.json"
+        );
+        let raw_fixture = std::fs::read_to_string(fixture_path).unwrap();
+        let file_events: Vec<FileEvent> = serde_json::from_str(&raw_fixture).unwrap();
+        let raw_events: Vec<_> = file_events
+            .into_iter()
+            .map(FileEvent::into_raw_event)
+            .collect();
+        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
+
+        for event in normalized.iter().take(3) {
+            insert_normalized_event_record(&mut conn, event).unwrap();
+        }
+
+        assert!(list_suggestions(&conn).unwrap().is_empty());
+
+        for event in normalized.iter().skip(3) {
+            insert_normalized_event_record(&mut conn, event).unwrap();
+        }
+
+        let suggestions = list_suggestions(&conn).unwrap();
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].count, 2);
+
+        let pattern_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))
+            .unwrap();
+        let suggestion_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM suggestions", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(pattern_count, 1);
+        assert_eq!(suggestion_count, 1);
+    }
+
+    #[test]
     fn lists_pending_file_raw_events_without_normalized_rows() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
 
         let pending_raw =
@@ -752,7 +838,7 @@ mod tests {
         insert_raw_event(&conn, &completed_raw).unwrap();
         let completed_raw_id = conn.last_insert_rowid();
         let normalized = normalize(&completed_raw).unwrap();
-        insert_normalized_event_for_raw_event(&conn, completed_raw_id, &normalized).unwrap();
+        insert_normalized_event_for_raw_event(&mut conn, completed_raw_id, &normalized).unwrap();
 
         let pending = list_pending_file_raw_events(&conn).unwrap();
 
@@ -764,7 +850,7 @@ mod tests {
 
     #[test]
     fn ignores_duplicate_normalized_rows_for_the_same_raw_event() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
 
         let raw_event = synthetic_file_event(
@@ -779,9 +865,9 @@ mod tests {
         let normalized = normalize(&raw_event).unwrap();
 
         let first_insert =
-            insert_normalized_event_for_raw_event(&conn, raw_event_id, &normalized).unwrap();
+            insert_normalized_event_for_raw_event(&mut conn, raw_event_id, &normalized).unwrap();
         let second_insert =
-            insert_normalized_event_for_raw_event(&conn, raw_event_id, &normalized).unwrap();
+            insert_normalized_event_for_raw_event(&mut conn, raw_event_id, &normalized).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM normalized_events", [], |row| {
@@ -796,7 +882,7 @@ mod tests {
 
     #[test]
     fn clear_analysis_state_removes_sessions_patterns_and_suggestions() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
 
         let fixture_path = concat!(
@@ -811,32 +897,8 @@ mod tests {
             .collect();
         let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
 
-        for session in split_into_sessions(&normalized, 300) {
-            let event_ids: Vec<_> = session
-                .events
-                .iter()
-                .map(|event| insert_normalized_event_record(&conn, event).unwrap())
-                .collect();
-            insert_session(
-                &conn,
-                &session.start_ts.to_rfc3339(),
-                &session.end_ts.to_rfc3339(),
-                &event_ids,
-            )
-            .unwrap();
-        }
-
-        let created_at = Utc::now().to_rfc3339();
-        for pattern in detect_repeated_patterns(&split_into_sessions(&normalized, 300)) {
-            let pattern_id = insert_pattern(
-                &conn,
-                &pattern.signature,
-                pattern.count,
-                pattern.avg_duration_ms,
-                &pattern.canonical_summary,
-            )
-            .unwrap();
-            insert_suggestion(&conn, pattern_id, &pattern.proposal_text, &created_at).unwrap();
+        for event in &normalized {
+            insert_normalized_event_record(&mut conn, event).unwrap();
         }
 
         clear_analysis_state(&conn).unwrap();
