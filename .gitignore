@@ -6,3 +6,24 @@ Cargo.lock.bak
 .DS_Store
 .idea/
 .vscode/
+
+# local runtime state
+flowd.db
+*.db-journal
+
+# local environments
+.env
+.env.*
+.direnv/
+
+# local tooling caches
+.codex/tmp/
+.codex/logs/
+
+# macOS metadata
+.AppleDouble
+.LSOverride
+
+# temporary notes and exports
+*.tmp
+*.log

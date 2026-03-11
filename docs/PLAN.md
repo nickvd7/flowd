@@ -56,7 +56,7 @@ Build a system that can say:
 
 ### Interfaces
 - `flowd` daemon
-- `flowctl` CLI
+- `flow-cli` CLI
 - SQLite storage
 - Config file
 
@@ -115,14 +115,13 @@ flowd/
 │  ├─ noisy_browsing/
 │  ├─ terminal_macro/
 │  └─ dangerous_shell/
-├─ scripts/
 ├─ .github/
 └─ PLAN.md
 ```
 
-Private repo or crate:
+Private repository (separate from this repo):
 ```text
-flow-intelligence/
+flowd-intelligence/
 ├─ crates/
 │  └─ flow-intelligence/
 ```
@@ -304,24 +303,24 @@ A small local LLM may help with:
 
 ### Main commands
 ```bash
-flowctl status
-flowctl tail
-flowctl events
-flowctl sessions
-flowctl patterns
-flowctl suggest
-flowctl apply <id>
-flowctl reject <id>
-flowctl snooze <id>
-flowctl automations
-flowctl runs
-flowctl undo <run-id>
-flowctl config check
+flow-cli status
+flow-cli tail
+flow-cli events
+flow-cli sessions
+flow-cli patterns
+flow-cli suggest
+flow-cli apply <id>
+flow-cli reject <id>
+flow-cli snooze <id>
+flow-cli automations
+flow-cli runs
+flow-cli undo <run-id>
+flow-cli config check
 ```
 
 ### Example suggestion output
 ```bash
-$ flowctl suggest
+$ flow-cli suggest
 
 [12] Process invoices from Downloads
 freq: 6x in 7 days
@@ -532,11 +531,11 @@ This preserves your moat in product quality rather than infrastructure.
 ## Recommended v1 focus
 Build only this first:
 - downloads folder watcher
-- terminal command observer
 - deterministic pattern detection
-- terminal suggestions
-- file automations only
-- dry-run and undo
+- terminal suggestions via CLI
+- file automations (rename and move)
+- dry-run preview
+- undo support
 
 That is the smallest real product slice.
 
