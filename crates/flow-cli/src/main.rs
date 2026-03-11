@@ -7,7 +7,7 @@ use flow_db::{
 };
 use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
-    execute_automation,
+    execute_automation, list_runs, undo_automation_run,
 };
 use std::fmt::Display;
 
@@ -32,6 +32,8 @@ enum Commands {
     Enable { automation_id: i64 },
     Run { automation_id: i64 },
     DryRun { automation_id: i64 },
+    Runs,
+    Undo { run_id: i64 },
 }
 
 fn main() {
@@ -57,6 +59,8 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Enable { automation_id }) => enable_automation_command(automation_id)?,
         Some(Commands::Run { automation_id }) => run_automation_command(automation_id)?,
         Some(Commands::DryRun { automation_id }) => dry_run_automation_command(automation_id)?,
+        Some(Commands::Runs) => render_runs()?,
+        Some(Commands::Undo { run_id }) => undo_run_command(run_id)?,
         None => println!("Use --help to see available commands."),
     }
 
@@ -250,6 +254,58 @@ fn run_automation_command(automation_id: i64) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn render_runs() -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let runs = list_runs(&conn).context("failed to read automation runs")?;
+
+    if runs.is_empty() {
+        println!("No automation runs stored.");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = runs
+        .into_iter()
+        .map(|run| {
+            vec![
+                run.run_id.to_string(),
+                run.automation_id.to_string(),
+                run.result,
+                run.started_at,
+                run.finished_at.unwrap_or_else(|| "-".to_string()),
+            ]
+        })
+        .collect();
+    print_table(
+        &[
+            "run_id",
+            "automation_id",
+            "result",
+            "started_at",
+            "finished_at",
+        ],
+        &rows,
+    );
+    Ok(())
+}
+
+/// `flow-cli undo <run_id>` undoes one specific completed automation run using
+/// the execution metadata captured when that run finished. The command never
+/// performs bulk undo and will abort if the selected run cannot be reversed
+/// safely.
+fn undo_run_command(run_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let outcome = undo_automation_run(&conn, run_id).context("failed to undo automation run")?;
+
+    for operation in &outcome.report.operations {
+        println!(
+            "{}: {} -> {}",
+            operation.action, operation.from, operation.to
+        );
+    }
+    println!("Undid automation run {}.", outcome.source_run_id);
     Ok(())
 }
 
