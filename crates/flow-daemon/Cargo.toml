@@ -1,0 +1,9 @@
+[package]
+name = "flow-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flow-core = { path = "../flow-core" }

@@ -1,0 +1,8 @@
+database_path = "./flowd.db"
+observed_folders = ["~/Downloads"]
+observe_clipboard = false
+observe_terminal = true
+observe_active_window = false
+redact_clipboard_content = true
+redact_command_args = true
+strip_browser_query_strings = true
