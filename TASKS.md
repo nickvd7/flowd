@@ -1041,3 +1041,303 @@ Requirements:
 - Prefer adding one module and one command at a time.
 - Do not let Codex redesign the architecture mid-stream.
 - Use the deterministic pipeline as the source of truth; treat LLM output as optional metadata.
+
+# TASKS.md — Public contributor roadmap for flowd
+
+This file tracks the **next meaningful work** for the open-source `flowd` repository.
+
+It is intentionally focused on:
+- small, reviewable tasks
+- deterministic behavior
+- local-first design
+- safe automation boundaries
+- contributor-friendly scope
+
+Internal planning, private intelligence work, and experimental prompts should live outside this public repo.
+
+---
+
+## Current implementation status
+
+The following foundations already exist in the repository:
+
+- Rust workspace and crate structure
+- TOML configuration loading
+- SQLite schema and repositories
+- filesystem watcher
+- raw event persistence
+- normalized event persistence
+- session building
+- repeated pattern detection
+- suggestion generation
+- automation approval flow
+- dry-run execution
+- safe execution for rename and move
+- undo support
+- CLI inspection commands
+
+This roadmap therefore focuses on the **next open-core improvements**, not the initial scaffolding work.
+
+---
+
+## Task 01 — Automatic pattern refresh hardening
+
+### Goal
+Make the analysis pipeline more robust when new normalized events arrive.
+
+### Deliverables
+- deterministic refresh path for sessions, patterns, and suggestions
+- clear boundaries between observation, analysis, and execution
+- tests for repeated refresh behavior
+
+### Acceptance criteria
+- repeated refreshes do not create duplicate stale rows
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 02 — Suggestion cleanup and scoring
+
+### Goal
+Improve suggestion quality by ranking them and cleaning up stale suggestions.
+
+### Deliverables
+- deterministic suggestion score
+- freshness tracking
+- stale suggestion handling
+- cleaner CLI output
+
+### Acceptance criteria
+- stale suggestions do not accumulate
+- suggestions are ranked by explicit deterministic signals
+- approved automations remain untouched
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 03 — Automation status management
+
+### Goal
+Allow automations to be enabled, disabled, and inspected by status.
+
+### Deliverables
+- automation status fields and persistence
+- CLI support for:
+  - `flow-cli enable <automation_id>`
+  - `flow-cli disable <automation_id>`
+- status shown in `flow-cli automations`
+
+### Acceptance criteria
+- disabled automations cannot be executed
+- active automations still support dry-run and run
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 04 — Undo support hardening
+
+### Goal
+Make undo support safer and more transparent.
+
+### Deliverables
+- improved execution metadata for reversible runs
+- `flow-cli runs`
+- `flow-cli undo <run_id>`
+- tests for reverse-order execution and safe aborts
+
+### Acceptance criteria
+- rename and move runs can be undone safely
+- unsafe or incomplete runs fail clearly
+- no bulk or implicit undo behavior exists
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 05 — CLI output polish
+
+### Goal
+Make CLI inspection commands more useful for real users.
+
+### Deliverables
+- clearer table-style output for:
+  - `flow-cli patterns`
+  - `flow-cli suggestions`
+  - `flow-cli sessions`
+  - `flow-cli automations`
+  - `flow-cli runs`
+- support for displaying status, confidence, freshness, and execution summaries where helpful
+
+### Acceptance criteria
+- output is human-readable and compact
+- snapshot or formatting tests exist where practical
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 06 — Ranking and confidence improvements
+
+### Goal
+Make suggestions and patterns more useful by improving deterministic ranking.
+
+### Deliverables
+- explicit scoring model based on:
+  - repetition count
+  - recency
+  - duration / estimated savings
+  - safety bias
+- sorting improvements in CLI output
+
+### Acceptance criteria
+- ranking is explicit and testable
+- suggestions feel more relevant on repeated fixture data
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 07 — Terminal workflow ingestion
+
+### Goal
+Expand observation beyond filesystem workflows.
+
+### Deliverables
+- terminal event ingestion format
+- terminal raw event persistence
+- normalization into terminal-related `NormalizedEvent` values
+- deterministic tests
+
+### Acceptance criteria
+- terminal events can be stored and normalized locally
+- no automatic shell execution exists
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 08 — Clipboard workflow ingestion
+
+### Goal
+Support optional clipboard event observation with privacy-safe defaults.
+
+### Deliverables
+- clipboard adapter
+- metadata-only mode
+- optional redacted content capture
+- normalization support where appropriate
+
+### Acceptance criteria
+- clipboard events can be captured locally
+- privacy settings are respected
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 09 — Browser event bridge
+
+### Goal
+Add lightweight browser context ingestion for workflow discovery.
+
+### Deliverables
+- local input path for URL/title events
+- optional query-string stripping
+- normalization into `visit_url`
+
+### Acceptance criteria
+- URL events can be stored and normalized
+- privacy settings are respected
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Task 10 — Fixtures and replay harness refresh
+
+### Goal
+Keep the test harness aligned with the live pipeline.
+
+### Deliverables
+- updated fixture sets for filesystem workflows
+- replay utility for event sequences
+- golden tests for sessions and patterns
+
+### Acceptance criteria
+- fixture replay remains easy to run
+- sessions and patterns remain reproducible in tests
+- `cargo test` passes
+
+---
+
+## Task 11 — Documentation polish
+
+### Goal
+Keep the public docs aligned with the current implementation.
+
+### Deliverables
+- refresh:
+  - `README.md`
+  - `docs/architecture.md`
+  - `docs/architecture-diagram.md`
+  - `docs/automation-dsl.md`
+  - `docs/privacy.md`
+- ensure examples match current CLI behavior
+
+### Acceptance criteria
+- docs reflect implemented commands and workflow
+- no outdated `flowctl` references remain
+- no unsupported features are described as complete
+
+---
+
+## Task 12 — Release-ready open-core MVP check
+
+### Goal
+Verify that the current open-core workflow loop is stable.
+
+### Deliverables
+- end-to-end integration test for:
+  - observe
+  - detect
+  - suggest
+  - approve
+  - dry-run
+  - run
+  - undo
+- release checklist for the public repo
+
+### Acceptance criteria
+- the open-core loop is covered by automated tests
+- `cargo build` passes
+- `cargo test` passes
+
+---
+
+## Suggested implementation order
+
+1. Task 01 — Automatic pattern refresh hardening
+2. Task 02 — Suggestion cleanup and scoring
+3. Task 03 — Automation status management
+4. Task 04 — Undo support hardening
+5. Task 05 — CLI output polish
+6. Task 06 — Ranking and confidence improvements
+7. Task 10 — Fixtures and replay harness refresh
+8. Task 11 — Documentation polish
+9. Task 12 — Release-ready open-core MVP check
+10. Task 07 — Terminal workflow ingestion
+11. Task 08 — Clipboard workflow ingestion
+12. Task 09 — Browser event bridge
+
+---
+
+## Notes for contributors
+
+- Keep changes small and focused.
+- Prefer one task per branch and PR.
+- Always include tests when behavior changes.
+- Treat deterministic logic as the source of truth.
+- Keep open-core automation safe, inspectable, and local-first.
