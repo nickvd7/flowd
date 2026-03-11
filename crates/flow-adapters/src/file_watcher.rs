@@ -99,7 +99,9 @@ fn rename_event_to_file_event(
         return None;
     }
 
-    if !is_regular_file_path(to_path) || should_ignore_path(from_path) || should_ignore_path(to_path)
+    if !is_regular_file_path(to_path)
+        || should_ignore_path(from_path)
+        || should_ignore_path(to_path)
     {
         return None;
     }
@@ -255,7 +257,10 @@ mod tests {
 
         assert_eq!(file_events.len(), 1);
         assert_eq!(file_events[0].kind, FileEventKind::Rename);
-        assert_eq!(file_events[0].from_path.as_deref(), Some(from_path.to_str().unwrap()));
+        assert_eq!(
+            file_events[0].from_path.as_deref(),
+            Some(from_path.to_str().unwrap())
+        );
         assert_eq!(file_events[0].path, to_path.display().to_string());
     }
 
@@ -278,7 +283,10 @@ mod tests {
 
         assert_eq!(file_events.len(), 1);
         assert_eq!(file_events[0].kind, FileEventKind::Move);
-        assert_eq!(file_events[0].from_path.as_deref(), Some(from_path.to_str().unwrap()));
+        assert_eq!(
+            file_events[0].from_path.as_deref(),
+            Some(from_path.to_str().unwrap())
+        );
         assert_eq!(file_events[0].path, to_path.display().to_string());
     }
 }
