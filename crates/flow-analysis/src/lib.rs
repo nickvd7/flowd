@@ -3,14 +3,16 @@ pub mod intelligence_boundary;
 use anyhow::{Context, Result};
 use flow_db::repo::{
     clear_session_state, insert_normalized_events_for_raw_events, insert_session,
-    list_normalized_events, list_pending_file_raw_events, mark_stale_patterns_and_suggestions,
-    suppress_suggestions_for_pattern, sync_suggestion_for_pattern, upsert_pattern,
+    list_normalized_events, list_pending_file_raw_events, list_suggestion_histories,
+    mark_stale_patterns_and_suggestions, suppress_suggestions_for_pattern,
+    sync_suggestion_for_pattern, upsert_pattern,
 };
 use flow_patterns::{
     detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
 };
 use intelligence_boundary::{
-    IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient, SuggestionDecisionAction,
+    map_patterns_to_contexts_with_history, IntelligenceBoundary, IntelligenceClient,
+    NoopIntelligenceClient, SuggestionDecisionAction,
 };
 use rusqlite::Connection;
 
@@ -36,9 +38,12 @@ pub fn refresh_analysis_state_with_intelligence(
     let sessions = split_into_sessions(&normalized_events, inactivity_secs);
     let patterns = detect_repeated_patterns(&sessions);
     let created_at = chrono::Utc::now().to_rfc3339();
+    let suggestion_histories =
+        list_suggestion_histories(conn).context("failed to read suggestion feedback history")?;
+    let contexts = map_patterns_to_contexts_with_history(&patterns, &suggestion_histories);
 
     let presentations = IntelligenceBoundary::new(intelligence_client)
-        .evaluate_patterns(&patterns)
+        .evaluate_contexts(&contexts)
         .context("failed to evaluate intelligence boundary")?;
 
     let tx = conn
@@ -142,11 +147,13 @@ mod tests {
     use flow_db::{
         migrations::run_migrations,
         repo::{
-            get_suggestion, insert_automation, insert_normalized_event_record, insert_raw_event,
+            get_suggestion, increment_accepted, increment_rejected, increment_shown,
+            increment_snoozed, insert_automation, insert_normalized_event_record, insert_raw_event,
             list_automations, list_normalized_events, list_patterns, list_pending_file_raw_events,
             list_suggestions, set_suggestion_status, AUTOMATION_STATUS_ACTIVE,
         },
     };
+    use std::cell::RefCell;
 
     struct TestIntelligenceClient;
 
@@ -168,6 +175,32 @@ mod tests {
                     })
                     .collect(),
             })
+        }
+    }
+
+    struct RecordingIntelligenceClient {
+        last_request: RefCell<Option<IntelligenceRequest>>,
+    }
+
+    impl RecordingIntelligenceClient {
+        fn new() -> Self {
+            Self {
+                last_request: RefCell::new(None),
+            }
+        }
+
+        fn last_request(&self) -> IntelligenceRequest {
+            self.last_request
+                .borrow()
+                .clone()
+                .expect("request should be recorded")
+        }
+    }
+
+    impl IntelligenceClient for RecordingIntelligenceClient {
+        fn evaluate(&self, request: &IntelligenceRequest) -> Result<IntelligenceResponse> {
+            self.last_request.replace(Some(request.clone()));
+            Ok(IntelligenceResponse::default())
         }
     }
 
@@ -232,6 +265,39 @@ mod tests {
         let suggestion = list_suggestions(&conn).unwrap().remove(0);
         assert!(suggestion.proposal_text.starts_with("Refined:"));
         assert!(suggestion.usefulness_score > baseline_score);
+    }
+
+    #[test]
+    fn analysis_refresh_passes_persisted_feedback_history_into_intelligence() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        for raw_event in load_invoice_fixture_events() {
+            let normalized = normalize(&raw_event).unwrap();
+            insert_normalized_event_record(&mut conn, &normalized).unwrap();
+        }
+
+        refresh_analysis_state(&mut conn, 300).unwrap();
+
+        let suggestion = list_suggestions(&conn).unwrap().remove(0);
+        increment_shown(&conn, suggestion.suggestion_id).unwrap();
+        increment_accepted(&conn, suggestion.suggestion_id).unwrap();
+        increment_rejected(&conn, suggestion.suggestion_id).unwrap();
+        increment_snoozed(&conn, suggestion.suggestion_id).unwrap();
+
+        let client = RecordingIntelligenceClient::new();
+        refresh_analysis_state_with_intelligence(&mut conn, 300, &client).unwrap();
+
+        let request = client.last_request();
+        assert_eq!(request.candidates.len(), 1);
+        assert_eq!(request.candidates[0].history.shown_count, 1);
+        assert_eq!(request.candidates[0].history.accepted_count, 1);
+        assert_eq!(request.candidates[0].history.rejected_count, 1);
+        assert_eq!(request.candidates[0].history.snoozed_count, 1);
+        assert!(request.candidates[0].history.last_shown_ts.is_some());
+        assert!(request.candidates[0].history.last_accepted_ts.is_some());
+        assert!(request.candidates[0].history.last_rejected_ts.is_some());
+        assert!(request.candidates[0].history.last_snoozed_ts.is_some());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use flow_db::repo::StoredSuggestion;
+use flow_db::repo::{StoredSuggestion, StoredSuggestionHistory};
 use flow_patterns::detect::PatternCandidate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,6 +164,32 @@ impl<'a> IntelligenceBoundary<'a> {
 }
 
 pub fn map_patterns_to_contexts(patterns: &[PatternCandidate]) -> Vec<InternalSuggestionContext> {
+    map_patterns_to_contexts_with_history(patterns, &[])
+}
+
+pub fn map_patterns_to_contexts_with_history(
+    patterns: &[PatternCandidate],
+    histories: &[StoredSuggestionHistory],
+) -> Vec<InternalSuggestionContext> {
+    let history_by_signature: HashMap<&str, InternalSuggestionHistory> = histories
+        .iter()
+        .map(|history| {
+            (
+                history.signature.as_str(),
+                InternalSuggestionHistory {
+                    shown_count: history.shown_count,
+                    accepted_count: history.accepted_count,
+                    rejected_count: history.rejected_count,
+                    snoozed_count: history.snoozed_count,
+                    last_shown_ts: history.last_shown_ts.clone(),
+                    last_accepted_ts: history.last_accepted_ts.clone(),
+                    last_rejected_ts: history.last_rejected_ts.clone(),
+                    last_snoozed_ts: history.last_snoozed_ts.clone(),
+                },
+            )
+        })
+        .collect();
+
     patterns
         .iter()
         .map(|pattern| InternalSuggestionContext {
@@ -177,7 +203,10 @@ pub fn map_patterns_to_contexts(patterns: &[PatternCandidate]) -> Vec<InternalSu
                 last_seen_at: pattern.last_seen_at.to_rfc3339(),
                 created_at: None,
             },
-            history: InternalSuggestionHistory::default(),
+            history: history_by_signature
+                .get(pattern.signature.as_str())
+                .cloned()
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -451,6 +480,39 @@ mod tests {
         let second = build_intelligence_request(&map_patterns_to_contexts(&patterns));
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn maps_pattern_candidates_with_persisted_feedback_history() {
+        let patterns = vec![pattern("CreateFile:invoice", "baseline")];
+        let histories = vec![StoredSuggestionHistory {
+            signature: "CreateFile:invoice".to_string(),
+            shown_count: 4,
+            accepted_count: 1,
+            rejected_count: 2,
+            snoozed_count: 3,
+            last_shown_ts: Some("2026-01-16T10:00:00+00:00".to_string()),
+            last_accepted_ts: Some("2026-01-17T10:00:00+00:00".to_string()),
+            last_rejected_ts: Some("2026-01-18T10:00:00+00:00".to_string()),
+            last_snoozed_ts: Some("2026-01-19T10:00:00+00:00".to_string()),
+        }];
+
+        let contexts = map_patterns_to_contexts_with_history(&patterns, &histories);
+        let request = build_intelligence_request(&contexts);
+
+        assert_eq!(
+            request.candidates[0].history,
+            InternalSuggestionHistory {
+                shown_count: 4,
+                accepted_count: 1,
+                rejected_count: 2,
+                snoozed_count: 3,
+                last_shown_ts: Some("2026-01-16T10:00:00+00:00".to_string()),
+                last_accepted_ts: Some("2026-01-17T10:00:00+00:00".to_string()),
+                last_rejected_ts: Some("2026-01-18T10:00:00+00:00".to_string()),
+                last_snoozed_ts: Some("2026-01-19T10:00:00+00:00".to_string()),
+            }
+        );
     }
 
     #[test]
