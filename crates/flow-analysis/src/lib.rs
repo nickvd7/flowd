@@ -11,7 +11,7 @@ use flow_patterns::{
     detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
 };
 use intelligence_boundary::{
-    map_patterns_to_contexts_with_history, IntelligenceBoundary, IntelligenceClient,
+    map_patterns_to_envelope_with_history_and_sessions, IntelligenceBoundary, IntelligenceClient,
     NoopIntelligenceClient, SuggestionDecisionAction,
 };
 use rusqlite::Connection;
@@ -40,10 +40,14 @@ pub fn refresh_analysis_state_with_intelligence(
     let created_at = chrono::Utc::now().to_rfc3339();
     let suggestion_histories =
         list_suggestion_histories(conn).context("failed to read suggestion feedback history")?;
-    let contexts = map_patterns_to_contexts_with_history(&patterns, &suggestion_histories);
+    let envelope = map_patterns_to_envelope_with_history_and_sessions(
+        &patterns,
+        &suggestion_histories,
+        &sessions,
+    );
 
     let presentations = IntelligenceBoundary::new(intelligence_client)
-        .evaluate_contexts(&contexts)
+        .evaluate_envelope(&envelope)
         .context("failed to evaluate intelligence boundary")?;
 
     let tx = conn
@@ -138,8 +142,8 @@ pub fn catch_up_analysis(conn: &mut Connection, inactivity_secs: i64) -> Result<
 mod tests {
     use super::*;
     use crate::intelligence_boundary::{
-        build_intelligence_request, map_patterns_to_contexts, IntelligenceClient,
-        IntelligenceDisplayDecision, IntelligenceRequest, IntelligenceResponse,
+        build_intelligence_request, map_patterns_to_envelope_with_history_and_sessions,
+        IntelligenceClient, IntelligenceDisplayDecision, IntelligenceRequest, IntelligenceResponse,
         SuggestionDecisionAction,
     };
     use chrono::Utc;
@@ -249,19 +253,22 @@ mod tests {
 
         refresh_analysis_state_with_intelligence(&mut conn, 300, &TestIntelligenceClient).unwrap();
 
-        let baseline_score = build_intelligence_request(&map_patterns_to_contexts(
-            &detect_repeated_patterns(&split_into_sessions(
-                &list_normalized_events(&conn)
-                    .unwrap()
-                    .into_iter()
-                    .map(|stored| stored.event)
-                    .collect::<Vec<_>>(),
-                300,
-            )),
-        ))
-        .candidates[0]
-            .suggestion
-            .usefulness_score;
+        let baseline_score =
+            build_intelligence_request(&map_patterns_to_envelope_with_history_and_sessions(
+                &detect_repeated_patterns(&split_into_sessions(
+                    &list_normalized_events(&conn)
+                        .unwrap()
+                        .into_iter()
+                        .map(|stored| stored.event)
+                        .collect::<Vec<_>>(),
+                    300,
+                )),
+                &[],
+                &[],
+            ))
+            .candidates[0]
+                .suggestion
+                .usefulness_score;
         let suggestion = list_suggestions(&conn).unwrap().remove(0);
         assert!(suggestion.proposal_text.starts_with("Refined:"));
         assert!(suggestion.usefulness_score > baseline_score);
@@ -290,6 +297,9 @@ mod tests {
 
         let request = client.last_request();
         assert_eq!(request.candidates.len(), 1);
+        assert_eq!(request.context.candidate_count, 1);
+        assert_eq!(request.context.session_summary.total_sessions, 2);
+        assert_eq!(request.context.session_summary.avg_events_per_session, 3);
         assert_eq!(request.candidates[0].history.shown_count, 1);
         assert_eq!(request.candidates[0].history.accepted_count, 1);
         assert_eq!(request.candidates[0].history.rejected_count, 1);
@@ -298,6 +308,18 @@ mod tests {
         assert!(request.candidates[0].history.last_accepted_ts.is_some());
         assert!(request.candidates[0].history.last_rejected_ts.is_some());
         assert!(request.candidates[0].history.last_snoozed_ts.is_some());
+        assert_eq!(request.context.feedback_summary.shown_count, 1);
+        assert_eq!(request.context.feedback_summary.accepted_count, 1);
+        assert_eq!(request.context.feedback_summary.rejected_count, 1);
+        assert_eq!(request.context.feedback_summary.snoozed_count, 1);
+        assert_eq!(request.context.feedback_summary.candidates_with_feedback, 1);
+        assert_eq!(request.candidates[0].pattern.count, 2);
+        assert_eq!(request.candidates[0].pattern.safety_score, Some(1.0));
+        assert!(request.candidates[0].recency.reference_ts.is_some());
+        assert!(request.candidates[0]
+            .recency
+            .seconds_since_last_seen
+            .is_some());
     }
 
     #[test]
