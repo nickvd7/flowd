@@ -163,6 +163,8 @@ Execution + undo
 
 `flowd` owns event capture, persistence, sessions, patterns, baseline suggestions, approval, execution, and undo. `flowd-intelligence`, when present, only influences ranking, timing, suppression, personalization, clustering, proposal wording, and display orchestration. The dependency direction is one-way: `flowd -> flowd-intelligence`.
 
+Explainability follows the same rule. When optional intelligence changes ordering, timing, suppression, wording, or display behavior, `flowd` can surface a compact explanation for that decision through the same boundary. If no intelligence is configured, `flowd` stays deterministic and reports an explicit baseline fallback explanation instead of inventing hidden reasoning.
+
 The system is intentionally modular:
 
 - **flow-adapters** — capture local system events

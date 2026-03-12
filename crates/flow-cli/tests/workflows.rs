@@ -109,6 +109,27 @@ fn suggestions_renders_detected_suggestions_table() {
 }
 
 #[test]
+fn suggestions_explain_renders_explanation_column() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["suggestions", "--explain"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("explain"));
+    assert!(stdout.contains("baseline fallback"));
+    assert!(stdout.contains(
+        "Open-core baseline order and wording were used because intelligence was unavailable."
+    ));
+}
+
+#[test]
 fn sessions_renders_recent_sessions_table() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("flowd.db");

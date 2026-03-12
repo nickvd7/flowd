@@ -41,6 +41,25 @@ fn suggest_renders_detected_file_workflow() {
     assert_eq!(stdout, expected);
 }
 
+#[test]
+fn suggest_explain_renders_baseline_fallback_details() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["suggest", "--explain"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("explain: baseline fallback"));
+    assert!(stdout.contains("score: baseline_score="));
+    assert!(stdout.contains("factors: fallback=No intelligence decision was applied."));
+}
+
 fn seed_database(db_path: &Path) {
     let mut conn = Connection::open(db_path).unwrap();
     run_migrations(&conn).unwrap();

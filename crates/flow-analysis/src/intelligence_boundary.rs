@@ -139,6 +139,32 @@ pub struct IntelligenceResponse {
     pub decisions: Vec<IntelligenceDisplayDecision>,
 }
 
+/// Explainability metadata is kept structured and explicit so `flowd` can show
+/// why an intelligence-driven suggestion changed without depending on opaque
+/// provider-specific blobs. This matters for suggestion quality because users
+/// and developers need to inspect ranking, timing, and suppression choices
+/// when private intelligence becomes more influential.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct IntelligenceExplanation {
+    pub summary: Option<String>,
+    pub score_breakdown: Vec<IntelligenceScoreComponent>,
+    pub timing_reason: Option<String>,
+    pub suppression_reason: Option<String>,
+    pub ranking_factors: Vec<IntelligenceRankingFactor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntelligenceScoreComponent {
+    pub label: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntelligenceRankingFactor {
+    pub label: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntelligenceDisplayDecision {
     pub pattern_signature: String,
@@ -146,6 +172,7 @@ pub struct IntelligenceDisplayDecision {
     pub proposal_text: Option<String>,
     pub usefulness_score: Option<f64>,
     pub rank_hint: Option<usize>,
+    pub explanation: Option<IntelligenceExplanation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,12 +188,37 @@ pub struct SuggestionPresentation {
     pub action: SuggestionDecisionAction,
     pub proposal_text: String,
     pub usefulness_score: f64,
+    pub explainability: SuggestionExplainability,
+}
+
+/// Explainability remains optional because open-core must stay viable without
+/// private intelligence. The boundary normalizes both intelligence-provided
+/// explanations and explicit baseline fallback explanations into one local
+/// deterministic shape before anything reaches the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExplainabilitySource {
+    Intelligence,
+    BaselineFallback,
+    MissingMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SuggestionExplainability {
+    pub source: ExplainabilitySource,
+    pub action: SuggestionDecisionAction,
+    pub rank_hint: Option<usize>,
+    pub summary: String,
+    pub score_breakdown: Vec<IntelligenceScoreComponent>,
+    pub timing_reason: Option<String>,
+    pub suppression_reason: Option<String>,
+    pub ranking_factors: Vec<IntelligenceRankingFactor>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SuggestionDisplayResult {
     pub suggestion: StoredSuggestion,
     pub action: SuggestionDecisionAction,
+    pub explainability: SuggestionExplainability,
 }
 
 /// The analysis layer should only invoke intelligence through this adapter so
@@ -509,18 +561,27 @@ pub fn apply_intelligence_response(
             let decision = decisions
                 .get(suggestion.pattern_signature.as_str())
                 .copied();
+            let action = decision
+                .map(|value| value.action)
+                .unwrap_or(SuggestionDecisionAction::Keep);
+            let proposal_text = decision
+                .and_then(|value| value.proposal_text.clone())
+                .unwrap_or_else(|| suggestion.baseline_proposal_text.clone());
+            let usefulness_score = decision
+                .and_then(|value| value.usefulness_score)
+                .unwrap_or(suggestion.usefulness_score);
 
             SuggestionPresentation {
                 pattern_signature: suggestion.pattern_signature.clone(),
-                action: decision
-                    .map(|value| value.action)
-                    .unwrap_or(SuggestionDecisionAction::Keep),
-                proposal_text: decision
-                    .and_then(|value| value.proposal_text.clone())
-                    .unwrap_or_else(|| suggestion.baseline_proposal_text.clone()),
-                usefulness_score: decision
-                    .and_then(|value| value.usefulness_score)
-                    .unwrap_or(suggestion.usefulness_score),
+                action,
+                proposal_text,
+                usefulness_score,
+                explainability: build_suggestion_explainability(
+                    decision,
+                    action,
+                    suggestion.usefulness_score,
+                    None,
+                ),
             }
         })
         .collect()
@@ -556,7 +617,16 @@ pub fn apply_intelligence_display(
             (
                 rank_hint,
                 index,
-                SuggestionDisplayResult { suggestion, action },
+                SuggestionDisplayResult {
+                    suggestion,
+                    action,
+                    explainability: build_suggestion_explainability(
+                        decision,
+                        action,
+                        suggestions[index].usefulness_score,
+                        Some(rank_hint),
+                    ),
+                },
             )
         })
         .collect();
@@ -617,6 +687,84 @@ pub fn display_stored_suggestions(
         .collect())
 }
 
+fn build_suggestion_explainability(
+    decision: Option<&IntelligenceDisplayDecision>,
+    action: SuggestionDecisionAction,
+    baseline_score: f64,
+    rank_hint: Option<usize>,
+) -> SuggestionExplainability {
+    match decision {
+        Some(decision) => match &decision.explanation {
+            Some(explanation) => SuggestionExplainability {
+                source: ExplainabilitySource::Intelligence,
+                action,
+                rank_hint: decision.rank_hint.or(rank_hint),
+                summary: explanation
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| default_decision_summary(action)),
+                score_breakdown: explanation.score_breakdown.clone(),
+                timing_reason: explanation.timing_reason.clone(),
+                suppression_reason: explanation.suppression_reason.clone(),
+                ranking_factors: explanation.ranking_factors.clone(),
+            },
+            None => SuggestionExplainability {
+                source: ExplainabilitySource::MissingMetadata,
+                action,
+                rank_hint: decision.rank_hint.or(rank_hint),
+                summary: "Intelligence returned a display decision without explanation metadata."
+                    .to_string(),
+                score_breakdown: vec![IntelligenceScoreComponent {
+                    label: "baseline_score".to_string(),
+                    value: decision.usefulness_score.unwrap_or(baseline_score),
+                }],
+                timing_reason: if action == SuggestionDecisionAction::Delay {
+                    Some("No timing reason was provided.".to_string())
+                } else {
+                    None
+                },
+                suppression_reason: if action == SuggestionDecisionAction::Suppress {
+                    Some("No suppression reason was provided.".to_string())
+                } else {
+                    None
+                },
+                ranking_factors: Vec::new(),
+            },
+        },
+        None => SuggestionExplainability {
+            source: ExplainabilitySource::BaselineFallback,
+            action,
+            rank_hint,
+            summary: "Open-core baseline order and wording were used because intelligence was unavailable."
+                .to_string(),
+            score_breakdown: vec![IntelligenceScoreComponent {
+                label: "baseline_score".to_string(),
+                value: baseline_score,
+            }],
+            timing_reason: None,
+            suppression_reason: None,
+            ranking_factors: vec![IntelligenceRankingFactor {
+                label: "fallback".to_string(),
+                detail: "No intelligence decision was applied.".to_string(),
+            }],
+        },
+    }
+}
+
+fn default_decision_summary(action: SuggestionDecisionAction) -> String {
+    match action {
+        SuggestionDecisionAction::Keep => {
+            "Intelligence kept this suggestion available for display.".to_string()
+        }
+        SuggestionDecisionAction::Delay => {
+            "Intelligence delayed this suggestion for a later display window.".to_string()
+        }
+        SuggestionDecisionAction::Suppress => {
+            "Intelligence suppressed this suggestion from display.".to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +800,28 @@ mod tests {
                         )),
                         usefulness_score: Some(candidate.suggestion.usefulness_score + 0.05),
                         rank_hint: None,
+                        explanation: Some(IntelligenceExplanation {
+                            summary: Some(
+                                "Recent accepted feedback kept this suggestion highly ranked."
+                                    .to_string(),
+                            ),
+                            score_breakdown: vec![
+                                IntelligenceScoreComponent {
+                                    label: "baseline_score".to_string(),
+                                    value: candidate.suggestion.usefulness_score,
+                                },
+                                IntelligenceScoreComponent {
+                                    label: "accepted_feedback_boost".to_string(),
+                                    value: 0.05,
+                                },
+                            ],
+                            timing_reason: None,
+                            suppression_reason: None,
+                            ranking_factors: vec![IntelligenceRankingFactor {
+                                label: "feedback".to_string(),
+                                detail: "Accepted similar suggestions recently.".to_string(),
+                            }],
+                        }),
                     })
                     .collect(),
             })
@@ -886,6 +1056,21 @@ mod tests {
                     proposal_text: Some("refined keep".to_string()),
                     usefulness_score: Some(0.945),
                     rank_hint: None,
+                    explanation: Some(IntelligenceExplanation {
+                        summary: Some(
+                            "Helpful recent activity kept this item visible.".to_string(),
+                        ),
+                        score_breakdown: vec![IntelligenceScoreComponent {
+                            label: "baseline_score".to_string(),
+                            value: 0.945,
+                        }],
+                        timing_reason: None,
+                        suppression_reason: None,
+                        ranking_factors: vec![IntelligenceRankingFactor {
+                            label: "activity".to_string(),
+                            detail: "The workflow repeated recently.".to_string(),
+                        }],
+                    }),
                 },
                 IntelligenceDisplayDecision {
                     pattern_signature: "suppress".to_string(),
@@ -893,6 +1078,21 @@ mod tests {
                     proposal_text: None,
                     usefulness_score: Some(0.1),
                     rank_hint: None,
+                    explanation: Some(IntelligenceExplanation {
+                        summary: Some("Recent rejections suppressed this suggestion.".to_string()),
+                        score_breakdown: vec![IntelligenceScoreComponent {
+                            label: "rejection_penalty".to_string(),
+                            value: -0.712,
+                        }],
+                        timing_reason: None,
+                        suppression_reason: Some(
+                            "The user recently rejected similar suggestions.".to_string(),
+                        ),
+                        ranking_factors: vec![IntelligenceRankingFactor {
+                            label: "feedback".to_string(),
+                            detail: "Multiple recent rejections were detected.".to_string(),
+                        }],
+                    }),
                 },
             ],
         };
@@ -902,9 +1102,17 @@ mod tests {
         assert_eq!(applied[0].proposal_text, "refined keep");
         assert_eq!(applied[0].usefulness_score, 0.945);
         assert_eq!(applied[0].action, SuggestionDecisionAction::Keep);
+        assert_eq!(
+            applied[0].explainability.source,
+            ExplainabilitySource::Intelligence
+        );
         assert_eq!(applied[1].proposal_text, "baseline suppress");
         assert_eq!(applied[1].usefulness_score, 0.1);
         assert_eq!(applied[1].action, SuggestionDecisionAction::Suppress);
+        assert_eq!(
+            applied[1].explainability.suppression_reason.as_deref(),
+            Some("The user recently rejected similar suggestions.")
+        );
     }
 
     #[test]
@@ -917,6 +1125,19 @@ mod tests {
 
         assert_eq!(presentations[0].proposal_text, "Refined: baseline");
         assert!((presentations[0].usefulness_score - 0.862).abs() < f64::EPSILON);
+        assert_eq!(
+            presentations[0].explainability.score_breakdown,
+            vec![
+                IntelligenceScoreComponent {
+                    label: "baseline_score".to_string(),
+                    value: 0.812,
+                },
+                IntelligenceScoreComponent {
+                    label: "accepted_feedback_boost".to_string(),
+                    value: 0.05,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -950,6 +1171,26 @@ mod tests {
                                 0
                             } else {
                                 1
+                            }),
+                            explanation: Some(IntelligenceExplanation {
+                                summary: Some("Ranking factors reordered the list.".to_string()),
+                                score_breakdown: vec![IntelligenceScoreComponent {
+                                    label: "baseline_score".to_string(),
+                                    value: candidate.suggestion.usefulness_score,
+                                }],
+                                timing_reason: None,
+                                suppression_reason: None,
+                                ranking_factors: vec![IntelligenceRankingFactor {
+                                    label: "rank".to_string(),
+                                    detail: format!(
+                                        "Assigned rank {}.",
+                                        if candidate.pattern_signature.ends_with('b') {
+                                            0
+                                        } else {
+                                            1
+                                        }
+                                    ),
+                                }],
                             }),
                         })
                         .collect(),
@@ -1000,6 +1241,25 @@ mod tests {
                                 } else {
                                     1
                                 }),
+                                explanation: Some(IntelligenceExplanation {
+                                    summary: Some("Display timing was adjusted.".to_string()),
+                                    score_breakdown: vec![IntelligenceScoreComponent {
+                                        label: "baseline_score".to_string(),
+                                        value: candidate.suggestion.usefulness_score,
+                                    }],
+                                    timing_reason: if action == SuggestionDecisionAction::Delay {
+                                        Some(
+                                            "A newer suggestion should be shown first.".to_string(),
+                                        )
+                                    } else {
+                                        None
+                                    },
+                                    suppression_reason: None,
+                                    ranking_factors: vec![IntelligenceRankingFactor {
+                                        label: "freshness".to_string(),
+                                        detail: "Newer activity received priority.".to_string(),
+                                    }],
+                                }),
                             }
                         })
                         .collect(),
@@ -1021,6 +1281,10 @@ mod tests {
         assert_eq!(
             evaluated[0].suggestion.proposal_text,
             "Display: Proposal for CreateFile:invoice-b"
+        );
+        assert_eq!(
+            evaluated[0].explainability.timing_reason.as_deref(),
+            Some("A newer suggestion should be shown first.")
         );
         assert_eq!(evaluated[1].action, SuggestionDecisionAction::Keep);
     }
@@ -1054,6 +1318,30 @@ mod tests {
                             } else {
                                 1
                             }),
+                            explanation: Some(IntelligenceExplanation {
+                                summary: Some("Display filters were applied.".to_string()),
+                                score_breakdown: vec![IntelligenceScoreComponent {
+                                    label: "baseline_score".to_string(),
+                                    value: candidate.suggestion.usefulness_score,
+                                }],
+                                timing_reason: if candidate.pattern_signature.ends_with('b') {
+                                    Some(
+                                        "This suggestion is delayed until the next refresh."
+                                            .to_string(),
+                                    )
+                                } else {
+                                    None
+                                },
+                                suppression_reason: if candidate.pattern_signature.ends_with('c') {
+                                    Some("A similar suggestion is already active.".to_string())
+                                } else {
+                                    None
+                                },
+                                ranking_factors: vec![IntelligenceRankingFactor {
+                                    label: "dedupe".to_string(),
+                                    detail: "Similar suggestions were clustered.".to_string(),
+                                }],
+                            }),
                         })
                         .collect(),
                 })
@@ -1086,5 +1374,94 @@ mod tests {
         let displayed = display_stored_suggestions(&suggestions, &NoopIntelligenceClient).unwrap();
 
         assert_eq!(displayed, suggestions);
+    }
+
+    #[test]
+    fn explainability_falls_back_deterministically_without_intelligence() {
+        let suggestions = vec![stored_suggestion(
+            "CreateFile:invoice-a",
+            0.9,
+            "2026-01-15T10:00:00+00:00",
+        )];
+
+        let evaluated = IntelligenceBoundary::new(&NoopIntelligenceClient)
+            .evaluate_stored_suggestions_for_display(&suggestions)
+            .unwrap();
+
+        assert_eq!(
+            evaluated[0].explainability.source,
+            ExplainabilitySource::BaselineFallback
+        );
+        assert_eq!(
+            evaluated[0].explainability.summary,
+            "Open-core baseline order and wording were used because intelligence was unavailable."
+        );
+        assert_eq!(
+            evaluated[0].explainability.score_breakdown,
+            vec![IntelligenceScoreComponent {
+                label: "baseline_score".to_string(),
+                value: 0.9,
+            }]
+        );
+    }
+
+    #[test]
+    fn explainability_metadata_is_preserved_through_display_mapping() {
+        let suggestions = vec![stored_suggestion(
+            "CreateFile:invoice-a",
+            0.9,
+            "2026-01-15T10:00:00+00:00",
+        )];
+        let response = IntelligenceResponse {
+            decisions: vec![IntelligenceDisplayDecision {
+                pattern_signature: "CreateFile:invoice-a".to_string(),
+                action: SuggestionDecisionAction::Keep,
+                proposal_text: None,
+                usefulness_score: Some(0.91),
+                rank_hint: Some(0),
+                explanation: Some(IntelligenceExplanation {
+                    summary: Some("Recent usage kept this first.".to_string()),
+                    score_breakdown: vec![
+                        IntelligenceScoreComponent {
+                            label: "baseline_score".to_string(),
+                            value: 0.9,
+                        },
+                        IntelligenceScoreComponent {
+                            label: "usage_boost".to_string(),
+                            value: 0.01,
+                        },
+                    ],
+                    timing_reason: None,
+                    suppression_reason: None,
+                    ranking_factors: vec![IntelligenceRankingFactor {
+                        label: "usage".to_string(),
+                        detail: "The workflow repeated this morning.".to_string(),
+                    }],
+                }),
+            }],
+        };
+
+        let evaluated = apply_intelligence_display(&suggestions, &response);
+
+        assert_eq!(
+            evaluated[0].explainability.score_breakdown,
+            vec![
+                IntelligenceScoreComponent {
+                    label: "baseline_score".to_string(),
+                    value: 0.9,
+                },
+                IntelligenceScoreComponent {
+                    label: "usage_boost".to_string(),
+                    value: 0.01,
+                },
+            ]
+        );
+        assert_eq!(
+            evaluated[0].explainability.ranking_factors,
+            vec![IntelligenceRankingFactor {
+                label: "usage".to_string(),
+                detail: "The workflow repeated this morning.".to_string(),
+            }]
+        );
     }
 }
