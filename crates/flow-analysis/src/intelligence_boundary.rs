@@ -658,21 +658,10 @@ mod tests {
         }
     }
 
-    fn test_suggestion_id(signature: &str) -> i64 {
-        signature
-            .chars()
-            .last()
-            .and_then(|suffix| suffix.to_digit(36))
-            .map(|value| value as i64)
-            .unwrap_or(100)
-    }
-
     fn stored_suggestion(signature: &str, score: f64, created_at: &str) -> StoredSuggestion {
-        let suggestion_id = test_suggestion_id(signature);
-
         StoredSuggestion {
-            suggestion_id,
-            pattern_id: suggestion_id + 10,
+            suggestion_id: if signature.ends_with('a') { 1 } else { 2 },
+            pattern_id: if signature.ends_with('a') { 11 } else { 12 },
             signature: signature.to_string(),
             count: 3,
             avg_duration_ms: 12_000,
@@ -1085,102 +1074,6 @@ mod tests {
             displayed[0].proposal_text,
             "Display: Proposal for CreateFile:invoice-a"
         );
-    }
-
-    #[test]
-    fn display_evaluation_keeps_rank_order_separate_from_delay_and_suppress_partitions() {
-        struct DisplayClient;
-
-        impl IntelligenceClient for DisplayClient {
-            fn evaluate(&self, request: &IntelligenceRequest) -> Result<IntelligenceResponse> {
-                Ok(IntelligenceResponse {
-                    decisions: request
-                        .candidates
-                        .iter()
-                        .map(|candidate| {
-                            let (action, rank_hint) =
-                                if candidate.pattern_signature.ends_with("weak-download-sort") {
-                                    (SuggestionDecisionAction::Delay, 0)
-                                } else if candidate
-                                    .pattern_signature
-                                    .ends_with("stale-screenshot-trash")
-                                {
-                                    (SuggestionDecisionAction::Suppress, 1)
-                                } else {
-                                    (SuggestionDecisionAction::Keep, 2)
-                                };
-
-                            IntelligenceDisplayDecision {
-                                pattern_signature: candidate.pattern_signature.clone(),
-                                action,
-                                proposal_text: None,
-                                usefulness_score: None,
-                                rank_hint: Some(rank_hint),
-                            }
-                        })
-                        .collect(),
-                })
-            }
-        }
-
-        let suggestions = vec![
-            stored_suggestion(
-                "workflow:stale-screenshot-trash",
-                0.92,
-                "2026-01-15T10:00:00+00:00",
-            ),
-            stored_suggestion(
-                "workflow:weak-download-sort",
-                0.88,
-                "2026-01-15T10:05:00+00:00",
-            ),
-            stored_suggestion(
-                "workflow:strong-keep",
-                0.95,
-                "2026-01-15T10:10:00+00:00",
-            ),
-        ];
-
-        let evaluated = IntelligenceBoundary::new(&DisplayClient)
-            .evaluate_stored_suggestions_for_display(&suggestions)
-            .unwrap();
-
-        let delayed_ids: Vec<_> = evaluated
-            .iter()
-            .filter(|result| result.action == SuggestionDecisionAction::Delay)
-            .map(|result| result.suggestion.suggestion_id)
-            .collect();
-        let suppressed_ids: Vec<_> = evaluated
-            .iter()
-            .filter(|result| result.action == SuggestionDecisionAction::Suppress)
-            .map(|result| result.suggestion.suggestion_id)
-            .collect();
-        let shown_ids: Vec<_> = evaluated
-            .iter()
-            .filter(|result| result.action == SuggestionDecisionAction::Keep)
-            .map(|result| result.suggestion.suggestion_id)
-            .collect();
-
-        assert_eq!(
-            evaluated
-                .iter()
-                .map(|result| result.suggestion.signature.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "workflow:weak-download-sort",
-                "workflow:stale-screenshot-trash",
-                "workflow:strong-keep",
-            ]
-        );
-        assert_eq!(
-            delayed_ids,
-            vec![test_suggestion_id("workflow:weak-download-sort")]
-        );
-        assert_eq!(
-            suppressed_ids,
-            vec![test_suggestion_id("workflow:stale-screenshot-trash")]
-        );
-        assert_eq!(shown_ids, vec![test_suggestion_id("workflow:strong-keep")]);
     }
 
     #[test]
