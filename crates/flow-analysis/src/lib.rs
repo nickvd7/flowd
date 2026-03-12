@@ -1,5 +1,4 @@
 pub mod intelligence_boundary;
-pub mod intelligence_contract_mapping;
 
 use anyhow::{Context, Result};
 use flow_db::repo::{
@@ -10,8 +9,7 @@ use flow_db::repo::{
 use flow_patterns::{
     detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
 };
-use intelligence_boundary::{IntelligenceClient, NoopIntelligenceClient};
-use intelligence_contract_mapping::{apply_intelligence_response, build_intelligence_request};
+use intelligence_boundary::{IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient};
 use rusqlite::Connection;
 
 /// The open-core analysis layer owns normalization, session building, pattern
@@ -37,11 +35,9 @@ pub fn refresh_analysis_state_with_intelligence(
     let patterns = detect_repeated_patterns(&sessions);
     let created_at = chrono::Utc::now().to_rfc3339();
 
-    let request = build_intelligence_request(&patterns);
-    let response = intelligence_client
-        .evaluate(&request)
+    let presentations = IntelligenceBoundary::new(intelligence_client)
+        .evaluate_patterns(&patterns)
         .context("failed to evaluate intelligence boundary")?;
-    let presentations = apply_intelligence_response(&patterns, &response);
 
     let tx = conn
         .transaction()
@@ -135,7 +131,8 @@ pub fn catch_up_analysis(conn: &mut Connection, inactivity_secs: i64) -> Result<
 mod tests {
     use super::*;
     use crate::intelligence_boundary::{
-        IntelligenceClient, IntelligenceDecision, IntelligenceRequest, IntelligenceResponse,
+        build_intelligence_request, map_patterns_to_contexts, IntelligenceClient,
+        IntelligenceDisplayDecision, IntelligenceRequest, IntelligenceResponse,
         SuggestionDecisionAction,
     };
     use chrono::Utc;
@@ -157,14 +154,14 @@ mod tests {
                 decisions: request
                     .candidates
                     .iter()
-                    .map(|candidate| IntelligenceDecision {
+                    .map(|candidate| IntelligenceDisplayDecision {
                         pattern_signature: candidate.pattern_signature.clone(),
                         action: SuggestionDecisionAction::Keep,
                         proposal_text: Some(format!(
                             "Refined: {}",
-                            candidate.baseline_proposal_text
+                            candidate.suggestion.baseline_proposal_text
                         )),
-                        usefulness_score: Some(candidate.usefulness_score + 0.05),
+                        usefulness_score: Some(candidate.suggestion.usefulness_score + 0.05),
                     })
                     .collect(),
             })
@@ -216,15 +213,18 @@ mod tests {
 
         refresh_analysis_state_with_intelligence(&mut conn, 300, &TestIntelligenceClient).unwrap();
 
-        let baseline_score = build_intelligence_request(&detect_repeated_patterns(&split_into_sessions(
-            &list_normalized_events(&conn)
-                .unwrap()
-                .into_iter()
-                .map(|stored| stored.event)
-                .collect::<Vec<_>>(),
-            300,
-        )))
+        let baseline_score = build_intelligence_request(&map_patterns_to_contexts(
+            &detect_repeated_patterns(&split_into_sessions(
+                &list_normalized_events(&conn)
+                    .unwrap()
+                    .into_iter()
+                    .map(|stored| stored.event)
+                    .collect::<Vec<_>>(),
+                300,
+            )),
+        ))
         .candidates[0]
+            .suggestion
             .usefulness_score;
         let suggestion = list_suggestions(&conn).unwrap().remove(0);
         assert!(suggestion.proposal_text.starts_with("Refined:"));

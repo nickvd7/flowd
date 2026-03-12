@@ -69,7 +69,7 @@ The integration direction is one-way:
 - `flowd` may call `flowd-intelligence`
 - `flowd-intelligence` must not own or pull storage, sessions, patterns, suggestion persistence, approval, execution, or undo into itself
 
-`flowd` never exposes internal storage rows or execution details directly to private intelligence. It maps internal analysis state to narrow contract/value objects, evaluates an optional client, and maps the resulting display decisions back into open-core suggestion behavior in one place.
+`flowd` never exposes internal storage rows or execution details directly to private intelligence. It maps internal analysis state to narrow contract/value objects, evaluates an optional client, and maps the resulting display decisions back into open-core suggestion behavior in one explicit analysis boundary module.
 
 Architecture note: Open-core owns facts and actions; private-core improves which suggestions are shown, when they are shown, and how they are presented.
 
