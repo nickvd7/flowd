@@ -1,10 +1,15 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use flow_analysis::intelligence_boundary::{
+    rank_stored_suggestions, IntelligenceClient, NoopIntelligenceClient,
+};
 use flow_core::config::Config;
 use flow_db::{
     open_database,
-    repo::{list_automations, list_patterns, list_recent_sessions, list_suggestions},
+    repo::{
+        list_automations, list_patterns, list_recent_sessions, list_suggestions, StoredSuggestion,
+    },
 };
 use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
@@ -71,7 +76,7 @@ fn run() -> anyhow::Result<()> {
 
 fn render_suggestions() -> anyhow::Result<()> {
     let conn = open_cli_database()?;
-    let suggestions = list_suggestions(&conn).context("failed to read suggestions")?;
+    let suggestions = ranked_suggestions_for_display(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -137,7 +142,7 @@ fn render_patterns() -> anyhow::Result<()> {
 
 fn render_suggestions_table() -> anyhow::Result<()> {
     let conn = open_cli_database()?;
-    let suggestions = list_suggestions(&conn).context("failed to read suggestions")?;
+    let suggestions = ranked_suggestions_for_display(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -365,6 +370,30 @@ fn open_cli_database() -> anyhow::Result<rusqlite::Connection> {
     open_database(&db_path).with_context(|| format!("failed to open database at {db_path}"))
 }
 
+fn ranked_suggestions_for_display(
+    conn: &rusqlite::Connection,
+    intelligence_client: &dyn IntelligenceClient,
+) -> anyhow::Result<Vec<StoredSuggestion>> {
+    let suggestions = list_suggestions(conn).context("failed to read suggestions")?;
+
+    if should_bypass_intelligence_ranking() {
+        return Ok(suggestions);
+    }
+
+    rank_stored_suggestions(&suggestions, intelligence_client)
+        .context("failed to rank suggestions through intelligence boundary")
+}
+
+fn should_bypass_intelligence_ranking() -> bool {
+    std::env::var("FLOWD_BYPASS_INTELLIGENCE_RANKING")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes"
+        })
+        .unwrap_or(false)
+}
+
 fn render_pattern_name(signature: &str) -> String {
     let mut groups = Vec::new();
     for group in signature
@@ -419,6 +448,111 @@ fn format_timestamp(value: &str) -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use flow_analysis::intelligence_boundary::{
+        IntelligenceDisplayDecision, IntelligenceRequest, IntelligenceResponse,
+        SuggestionDecisionAction,
+    };
+
+    struct RankingClient;
+
+    impl IntelligenceClient for RankingClient {
+        fn evaluate(&self, request: &IntelligenceRequest) -> Result<IntelligenceResponse> {
+            Ok(IntelligenceResponse {
+                decisions: request
+                    .candidates
+                    .iter()
+                    .map(|candidate| IntelligenceDisplayDecision {
+                        pattern_signature: candidate.pattern_signature.clone(),
+                        action: SuggestionDecisionAction::Keep,
+                        proposal_text: None,
+                        usefulness_score: None,
+                        rank_hint: Some(if candidate.pattern_signature.ends_with('b') {
+                            0
+                        } else {
+                            1
+                        }),
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    fn stored_suggestion(
+        suggestion_id: i64,
+        signature: &str,
+        usefulness_score: f64,
+    ) -> StoredSuggestion {
+        StoredSuggestion {
+            suggestion_id,
+            pattern_id: suggestion_id,
+            signature: signature.to_string(),
+            count: 2,
+            avg_duration_ms: 10_000,
+            canonical_summary: "CreateFile -> RenameFile".to_string(),
+            proposal_text: format!("Proposal for {signature}"),
+            usefulness_score,
+            freshness: "current".to_string(),
+            last_seen_at: "2026-01-15T10:00:00+00:00".to_string(),
+            created_at: "2026-01-15T10:00:00+00:00".to_string(),
+        }
+    }
+
+    #[test]
+    fn display_ranking_uses_intelligence_when_available() {
+        let suggestions = vec![
+            stored_suggestion(1, "CreateFile:invoice-a", 0.9),
+            stored_suggestion(2, "CreateFile:invoice-b", 0.8),
+        ];
+
+        let ranked = rank_stored_suggestions(&suggestions, &RankingClient).unwrap();
+
+        assert_eq!(ranked[0].signature, "CreateFile:invoice-b");
+        assert_eq!(ranked[1].signature, "CreateFile:invoice-a");
+    }
+
+    #[test]
+    fn display_ranking_falls_back_to_existing_order_without_intelligence() {
+        let suggestions = vec![
+            stored_suggestion(1, "CreateFile:invoice-a", 0.9),
+            stored_suggestion(2, "CreateFile:invoice-b", 0.8),
+        ];
+
+        let ranked = rank_stored_suggestions(&suggestions, &NoopIntelligenceClient).unwrap();
+
+        assert_eq!(ranked, suggestions);
+    }
+
+    #[test]
+    fn display_ranking_is_deterministic() {
+        let suggestions = vec![
+            stored_suggestion(1, "CreateFile:invoice-a", 0.9),
+            stored_suggestion(2, "CreateFile:invoice-b", 0.8),
+        ];
+
+        let first = rank_stored_suggestions(&suggestions, &RankingClient).unwrap();
+        let second = rank_stored_suggestions(&suggestions, &RankingClient).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn bypass_flag_disables_intelligence_ranking() {
+        // The command path should remain easy to bypass even when a client exists.
+        unsafe {
+            std::env::set_var("FLOWD_BYPASS_INTELLIGENCE_RANKING", "true");
+        }
+        assert!(should_bypass_intelligence_ranking());
+        unsafe {
+            std::env::remove_var("FLOWD_BYPASS_INTELLIGENCE_RANKING");
+        }
+        assert!(!should_bypass_intelligence_ranking());
+    }
 }
 
 fn summarize_run_operations(payload: Option<&str>) -> usize {
