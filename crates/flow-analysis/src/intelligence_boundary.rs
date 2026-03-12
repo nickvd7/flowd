@@ -1,6 +1,6 @@
 use anyhow::Result;
 use flow_db::repo::{StoredSuggestion, StoredSuggestionHistory};
-use flow_patterns::detect::PatternCandidate;
+use flow_patterns::{detect::PatternCandidate, sessions::EventSession};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -65,10 +65,63 @@ pub struct InternalSuggestionHistory {
 pub struct InternalSuggestionContext {
     pub suggestion: InternalSuggestionRecord,
     pub history: InternalSuggestionHistory,
+    pub pattern: InternalPatternMetadata,
+    pub recency: InternalRecencySignals,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct InternalPatternMetadata {
+    pub canonical_summary: String,
+    pub count: usize,
+    pub avg_duration_ms: i64,
+    pub safety_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalRecencySignals {
+    pub reference_ts: Option<String>,
+    pub seconds_since_last_seen: Option<i64>,
+    pub seconds_since_created: Option<i64>,
+    pub seconds_since_last_shown: Option<i64>,
+    pub seconds_since_last_accepted: Option<i64>,
+    pub seconds_since_last_rejected: Option<i64>,
+    pub seconds_since_last_snoozed: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalSessionSummary {
+    pub total_sessions: usize,
+    pub avg_session_duration_ms: i64,
+    pub avg_events_per_session: usize,
+    pub latest_session_end_ts: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalFeedbackSummary {
+    pub shown_count: u32,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub snoozed_count: u32,
+    pub candidates_with_feedback: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntelligenceEvaluationContext {
+    pub reference_ts: Option<String>,
+    pub candidate_count: usize,
+    pub session_summary: InternalSessionSummary,
+    pub feedback_summary: InternalFeedbackSummary,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct IntelligenceEvaluationEnvelope {
+    pub context: IntelligenceEvaluationContext,
+    pub candidates: Vec<InternalSuggestionContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntelligenceRequest {
+    pub context: IntelligenceEvaluationContext,
     pub candidates: Vec<IntelligenceCandidateInput>,
 }
 
@@ -77,6 +130,8 @@ pub struct IntelligenceCandidateInput {
     pub pattern_signature: String,
     pub suggestion: InternalSuggestionRecord,
     pub history: InternalSuggestionHistory,
+    pub pattern: InternalPatternMetadata,
+    pub recency: InternalRecencySignals,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -137,17 +192,26 @@ impl<'a> IntelligenceBoundary<'a> {
         &self,
         contexts: &[InternalSuggestionContext],
     ) -> Result<Vec<SuggestionPresentation>> {
-        let request = build_intelligence_request(contexts);
+        let request = build_intelligence_request(&build_envelope_from_contexts(contexts, None));
         let response = self.client.evaluate(&request)?;
         Ok(apply_intelligence_response(contexts, &response))
+    }
+
+    pub fn evaluate_envelope(
+        &self,
+        envelope: &IntelligenceEvaluationEnvelope,
+    ) -> Result<Vec<SuggestionPresentation>> {
+        let request = build_intelligence_request(envelope);
+        let response = self.client.evaluate(&request)?;
+        Ok(apply_intelligence_response(&envelope.candidates, &response))
     }
 
     pub fn rank_suggestions(
         &self,
         suggestions: &[StoredSuggestion],
     ) -> Result<Vec<StoredSuggestion>> {
-        let contexts = map_stored_suggestions_to_contexts(suggestions);
-        let request = build_intelligence_request(&contexts);
+        let envelope = map_stored_suggestions_to_envelope(suggestions);
+        let request = build_intelligence_request(&envelope);
         let response = self.client.evaluate(&request)?;
         Ok(apply_intelligence_ranking(suggestions, &response))
     }
@@ -156,21 +220,29 @@ impl<'a> IntelligenceBoundary<'a> {
         &self,
         suggestions: &[StoredSuggestion],
     ) -> Result<Vec<SuggestionDisplayResult>> {
-        let contexts = map_stored_suggestions_to_contexts(suggestions);
-        let request = build_intelligence_request(&contexts);
+        let envelope = map_stored_suggestions_to_envelope(suggestions);
+        let request = build_intelligence_request(&envelope);
         let response = self.client.evaluate(&request)?;
         Ok(apply_intelligence_display(suggestions, &response))
     }
 }
 
 pub fn map_patterns_to_contexts(patterns: &[PatternCandidate]) -> Vec<InternalSuggestionContext> {
-    map_patterns_to_contexts_with_history(patterns, &[])
+    map_patterns_to_envelope_with_history_and_sessions(patterns, &[], &[]).candidates
 }
 
 pub fn map_patterns_to_contexts_with_history(
     patterns: &[PatternCandidate],
     histories: &[StoredSuggestionHistory],
 ) -> Vec<InternalSuggestionContext> {
+    map_patterns_to_envelope_with_history_and_sessions(patterns, histories, &[]).candidates
+}
+
+pub fn map_patterns_to_envelope_with_history_and_sessions(
+    patterns: &[PatternCandidate],
+    histories: &[StoredSuggestionHistory],
+    sessions: &[EventSession],
+) -> IntelligenceEvaluationEnvelope {
     let history_by_signature: HashMap<&str, InternalSuggestionHistory> = histories
         .iter()
         .map(|history| {
@@ -190,7 +262,7 @@ pub fn map_patterns_to_contexts_with_history(
         })
         .collect();
 
-    patterns
+    let candidates: Vec<_> = patterns
         .iter()
         .map(|pattern| InternalSuggestionContext {
             suggestion: InternalSuggestionRecord {
@@ -207,18 +279,34 @@ pub fn map_patterns_to_contexts_with_history(
                 .get(pattern.signature.as_str())
                 .cloned()
                 .unwrap_or_default(),
+            pattern: InternalPatternMetadata {
+                canonical_summary: pattern.canonical_summary.clone(),
+                count: pattern.count,
+                avg_duration_ms: pattern.avg_duration_ms,
+                safety_score: Some(pattern.safety_score),
+            },
+            recency: InternalRecencySignals::default(),
         })
-        .collect()
+        .collect();
+
+    let session_summary = summarize_sessions(sessions);
+    build_envelope_from_contexts(&candidates, Some(session_summary))
 }
 
-pub fn build_intelligence_request(contexts: &[InternalSuggestionContext]) -> IntelligenceRequest {
+pub fn build_intelligence_request(
+    envelope: &IntelligenceEvaluationEnvelope,
+) -> IntelligenceRequest {
     IntelligenceRequest {
-        candidates: contexts
+        context: envelope.context.clone(),
+        candidates: envelope
+            .candidates
             .iter()
             .map(|context| IntelligenceCandidateInput {
                 pattern_signature: context.suggestion.pattern_signature.clone(),
                 suggestion: context.suggestion.clone(),
                 history: context.history.clone(),
+                pattern: context.pattern.clone(),
+                recency: context.recency.clone(),
             })
             .collect(),
     }
@@ -227,7 +315,13 @@ pub fn build_intelligence_request(contexts: &[InternalSuggestionContext]) -> Int
 pub fn map_stored_suggestions_to_contexts(
     suggestions: &[StoredSuggestion],
 ) -> Vec<InternalSuggestionContext> {
-    suggestions
+    map_stored_suggestions_to_envelope(suggestions).candidates
+}
+
+pub fn map_stored_suggestions_to_envelope(
+    suggestions: &[StoredSuggestion],
+) -> IntelligenceEvaluationEnvelope {
+    let candidates: Vec<_> = suggestions
         .iter()
         .map(|suggestion| InternalSuggestionContext {
             suggestion: InternalSuggestionRecord {
@@ -250,8 +344,152 @@ pub fn map_stored_suggestions_to_contexts(
                 last_rejected_ts: suggestion.last_rejected_ts.clone(),
                 last_snoozed_ts: suggestion.last_snoozed_ts.clone(),
             },
+            pattern: InternalPatternMetadata {
+                canonical_summary: suggestion.canonical_summary.clone(),
+                count: suggestion.count,
+                avg_duration_ms: suggestion.avg_duration_ms,
+                safety_score: None,
+            },
+            recency: InternalRecencySignals::default(),
         })
-        .collect()
+        .collect();
+
+    build_envelope_from_contexts(&candidates, None)
+}
+
+pub fn build_envelope_from_contexts(
+    contexts: &[InternalSuggestionContext],
+    session_summary: Option<InternalSessionSummary>,
+) -> IntelligenceEvaluationEnvelope {
+    let reference_ts = contexts.iter().flat_map(candidate_timestamp_values).max();
+
+    let candidates: Vec<_> = contexts
+        .iter()
+        .map(|context| {
+            let mut mapped = context.clone();
+            mapped.recency = InternalRecencySignals {
+                reference_ts: reference_ts.clone(),
+                seconds_since_last_seen: diff_seconds(
+                    reference_ts.as_deref(),
+                    Some(context.suggestion.last_seen_at.as_str()),
+                ),
+                seconds_since_created: diff_seconds(
+                    reference_ts.as_deref(),
+                    context.suggestion.created_at.as_deref(),
+                ),
+                seconds_since_last_shown: diff_seconds(
+                    reference_ts.as_deref(),
+                    context.history.last_shown_ts.as_deref(),
+                ),
+                seconds_since_last_accepted: diff_seconds(
+                    reference_ts.as_deref(),
+                    context.history.last_accepted_ts.as_deref(),
+                ),
+                seconds_since_last_rejected: diff_seconds(
+                    reference_ts.as_deref(),
+                    context.history.last_rejected_ts.as_deref(),
+                ),
+                seconds_since_last_snoozed: diff_seconds(
+                    reference_ts.as_deref(),
+                    context.history.last_snoozed_ts.as_deref(),
+                ),
+            };
+            mapped
+        })
+        .collect();
+
+    IntelligenceEvaluationEnvelope {
+        context: IntelligenceEvaluationContext {
+            reference_ts,
+            candidate_count: candidates.len(),
+            session_summary: session_summary.unwrap_or_default(),
+            feedback_summary: summarize_feedback(&candidates),
+        },
+        candidates,
+    }
+}
+
+fn summarize_sessions(sessions: &[EventSession]) -> InternalSessionSummary {
+    if sessions.is_empty() {
+        return InternalSessionSummary::default();
+    }
+
+    let total_duration_ms: i64 = sessions
+        .iter()
+        .map(|session| {
+            session
+                .end_ts
+                .signed_duration_since(session.start_ts)
+                .num_milliseconds()
+        })
+        .sum();
+    let total_events: usize = sessions.iter().map(|session| session.events.len()).sum();
+    let latest_session_end_ts = sessions
+        .iter()
+        .map(|session| session.end_ts.to_rfc3339())
+        .max();
+
+    InternalSessionSummary {
+        total_sessions: sessions.len(),
+        avg_session_duration_ms: total_duration_ms / sessions.len() as i64,
+        avg_events_per_session: total_events / sessions.len(),
+        latest_session_end_ts,
+    }
+}
+
+fn summarize_feedback(contexts: &[InternalSuggestionContext]) -> InternalFeedbackSummary {
+    InternalFeedbackSummary {
+        shown_count: contexts.iter().map(|value| value.history.shown_count).sum(),
+        accepted_count: contexts
+            .iter()
+            .map(|value| value.history.accepted_count)
+            .sum(),
+        rejected_count: contexts
+            .iter()
+            .map(|value| value.history.rejected_count)
+            .sum(),
+        snoozed_count: contexts
+            .iter()
+            .map(|value| value.history.snoozed_count)
+            .sum(),
+        candidates_with_feedback: contexts
+            .iter()
+            .filter(|value| {
+                value.history.shown_count > 0
+                    || value.history.accepted_count > 0
+                    || value.history.rejected_count > 0
+                    || value.history.snoozed_count > 0
+            })
+            .count(),
+    }
+}
+
+fn candidate_timestamp_values(context: &InternalSuggestionContext) -> Vec<String> {
+    let mut timestamps = vec![context.suggestion.last_seen_at.clone()];
+    if let Some(created_at) = &context.suggestion.created_at {
+        timestamps.push(created_at.clone());
+    }
+    if let Some(timestamp) = &context.history.last_shown_ts {
+        timestamps.push(timestamp.clone());
+    }
+    if let Some(timestamp) = &context.history.last_accepted_ts {
+        timestamps.push(timestamp.clone());
+    }
+    if let Some(timestamp) = &context.history.last_rejected_ts {
+        timestamps.push(timestamp.clone());
+    }
+    if let Some(timestamp) = &context.history.last_snoozed_ts {
+        timestamps.push(timestamp.clone());
+    }
+    timestamps
+}
+
+fn diff_seconds(reference: Option<&str>, value: Option<&str>) -> Option<i64> {
+    let reference = reference?;
+    let value = value?;
+    let reference = chrono::DateTime::parse_from_rfc3339(reference).ok()?;
+    let value = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    Some(reference.timestamp() - value.timestamp())
 }
 
 pub fn apply_intelligence_response(
@@ -446,10 +684,15 @@ mod tests {
 
     #[test]
     fn maps_internal_suggestion_data_into_narrow_client_inputs() {
-        let contexts = map_patterns_to_contexts(&[pattern("CreateFile:invoice", "baseline")]);
-        let request = build_intelligence_request(&contexts);
+        let envelope = map_patterns_to_envelope_with_history_and_sessions(
+            &[pattern("CreateFile:invoice", "baseline")],
+            &[],
+            &[],
+        );
+        let request = build_intelligence_request(&envelope);
 
         assert_eq!(request.candidates.len(), 1);
+        assert_eq!(request.context.candidate_count, 1);
         assert_eq!(
             request.candidates[0].pattern_signature,
             "CreateFile:invoice"
@@ -467,6 +710,19 @@ mod tests {
             request.candidates[0].history,
             InternalSuggestionHistory::default()
         );
+        assert_eq!(
+            envelope.candidates[0].pattern,
+            InternalPatternMetadata {
+                canonical_summary: "CreateFile -> RenameFile -> MoveFile".to_string(),
+                count: 3,
+                avg_duration_ms: 12_000,
+                safety_score: Some(1.0),
+            }
+        );
+        assert_eq!(
+            envelope.candidates[0].recency.seconds_since_last_seen,
+            Some(0)
+        );
     }
 
     #[test]
@@ -476,8 +732,12 @@ mod tests {
             pattern("CreateFile:report", "baseline report"),
         ];
 
-        let first = build_intelligence_request(&map_patterns_to_contexts(&patterns));
-        let second = build_intelligence_request(&map_patterns_to_contexts(&patterns));
+        let first = build_intelligence_request(
+            &map_patterns_to_envelope_with_history_and_sessions(&patterns, &[], &[]),
+        );
+        let second = build_intelligence_request(
+            &map_patterns_to_envelope_with_history_and_sessions(&patterns, &[], &[]),
+        );
 
         assert_eq!(first, second);
     }
@@ -497,8 +757,9 @@ mod tests {
             last_snoozed_ts: Some("2026-01-19T10:00:00+00:00".to_string()),
         }];
 
-        let contexts = map_patterns_to_contexts_with_history(&patterns, &histories);
-        let request = build_intelligence_request(&contexts);
+        let envelope =
+            map_patterns_to_envelope_with_history_and_sessions(&patterns, &histories, &[]);
+        let request = build_intelligence_request(&envelope);
 
         assert_eq!(
             request.candidates[0].history,
@@ -512,6 +773,15 @@ mod tests {
                 last_rejected_ts: Some("2026-01-18T10:00:00+00:00".to_string()),
                 last_snoozed_ts: Some("2026-01-19T10:00:00+00:00".to_string()),
             }
+        );
+        assert_eq!(request.context.feedback_summary.shown_count, 4);
+        assert_eq!(request.context.feedback_summary.accepted_count, 1);
+        assert_eq!(request.context.feedback_summary.rejected_count, 2);
+        assert_eq!(request.context.feedback_summary.snoozed_count, 3);
+        assert_eq!(request.context.feedback_summary.candidates_with_feedback, 1);
+        assert_eq!(
+            envelope.candidates[0].recency.reference_ts.as_deref(),
+            Some("2026-01-19T10:00:00+00:00")
         );
     }
 
@@ -548,6 +818,44 @@ mod tests {
                 last_rejected_ts: Some("2026-01-18T10:00:00+00:00".to_string()),
                 last_snoozed_ts: Some("2026-01-19T10:00:00+00:00".to_string()),
             }
+        );
+        assert_eq!(
+            contexts[0].recency.reference_ts.as_deref(),
+            Some("2026-01-19T10:00:00+00:00")
+        );
+        assert_eq!(contexts[0].recency.seconds_since_last_seen, Some(345_600));
+        assert_eq!(contexts[0].pattern.safety_score, None);
+    }
+
+    #[test]
+    fn envelope_includes_session_summary_and_stable_recency_signals() {
+        let contexts = map_patterns_to_envelope_with_history_and_sessions(
+            &[pattern("CreateFile:invoice", "baseline")],
+            &[],
+            &[flow_patterns::sessions::EventSession {
+                start_ts: Utc.with_ymd_and_hms(2026, 1, 15, 9, 59, 0).unwrap(),
+                end_ts: Utc.with_ymd_and_hms(2026, 1, 15, 10, 0, 0).unwrap(),
+                events: Vec::new(),
+            }],
+        );
+
+        assert_eq!(contexts.context.session_summary.total_sessions, 1);
+        assert_eq!(
+            contexts.context.session_summary.avg_session_duration_ms,
+            60_000
+        );
+        assert_eq!(contexts.context.session_summary.avg_events_per_session, 0);
+        assert_eq!(
+            contexts
+                .context
+                .session_summary
+                .latest_session_end_ts
+                .as_deref(),
+            Some("2026-01-15T10:00:00+00:00")
+        );
+        assert_eq!(
+            contexts.candidates[0].recency.reference_ts.as_deref(),
+            Some("2026-01-15T10:00:00+00:00")
         );
     }
 
