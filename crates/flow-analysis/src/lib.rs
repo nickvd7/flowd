@@ -162,6 +162,7 @@ mod tests {
                             candidate.suggestion.baseline_proposal_text
                         )),
                         usefulness_score: Some(candidate.suggestion.usefulness_score + 0.05),
+                        rank_hint: None,
                     })
                     .collect(),
             })

@@ -9,6 +9,7 @@ anyhow.workspace = true
 clap.workspace = true
 chrono.workspace = true
 flow-core = { path = "../flow-core" }
+flow-analysis = { path = "../flow-analysis" }
 flow-db = { path = "../flow-db" }
 flow-dsl = { path = "../flow-dsl" }
 flow-exec = { path = "../flow-exec" }
@@ -18,6 +19,5 @@ serde_yaml.workspace = true
 
 [dev-dependencies]
 flow-adapters = { path = "../flow-adapters" }
-flow-analysis = { path = "../flow-analysis" }
 flow-patterns = { path = "../flow-patterns" }
 tempfile.workspace = true

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use flow_db::repo::StoredSuggestion;
 use flow_patterns::detect::PatternCandidate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,6 +85,7 @@ pub struct IntelligenceDisplayDecision {
     pub action: SuggestionDecisionAction,
     pub proposal_text: Option<String>,
     pub usefulness_score: Option<f64>,
+    pub rank_hint: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,16 @@ impl<'a> IntelligenceBoundary<'a> {
         let response = self.client.evaluate(&request)?;
         Ok(apply_intelligence_response(contexts, &response))
     }
+
+    pub fn rank_suggestions(
+        &self,
+        suggestions: &[StoredSuggestion],
+    ) -> Result<Vec<StoredSuggestion>> {
+        let contexts = map_stored_suggestions_to_contexts(suggestions);
+        let request = build_intelligence_request(&contexts);
+        let response = self.client.evaluate(&request)?;
+        Ok(apply_intelligence_ranking(suggestions, &response))
+    }
 }
 
 pub fn map_patterns_to_contexts(patterns: &[PatternCandidate]) -> Vec<InternalSuggestionContext> {
@@ -158,6 +170,26 @@ pub fn build_intelligence_request(contexts: &[InternalSuggestionContext]) -> Int
             })
             .collect(),
     }
+}
+
+pub fn map_stored_suggestions_to_contexts(
+    suggestions: &[StoredSuggestion],
+) -> Vec<InternalSuggestionContext> {
+    suggestions
+        .iter()
+        .map(|suggestion| InternalSuggestionContext {
+            suggestion: InternalSuggestionRecord {
+                pattern_signature: suggestion.signature.clone(),
+                canonical_summary: suggestion.canonical_summary.clone(),
+                baseline_proposal_text: suggestion.proposal_text.clone(),
+                usefulness_score: suggestion.usefulness_score,
+                count: suggestion.count,
+                avg_duration_ms: suggestion.avg_duration_ms,
+                last_seen_at: suggestion.last_seen_at.clone(),
+            },
+            history: InternalSuggestionHistory::default(),
+        })
+        .collect()
 }
 
 pub fn apply_intelligence_response(
@@ -196,6 +228,42 @@ pub fn apply_intelligence_response(
         .collect()
 }
 
+pub fn apply_intelligence_ranking(
+    suggestions: &[StoredSuggestion],
+    response: &IntelligenceResponse,
+) -> Vec<StoredSuggestion> {
+    let decisions: HashMap<&str, &IntelligenceDisplayDecision> = response
+        .decisions
+        .iter()
+        .map(|decision| (decision.pattern_signature.as_str(), decision))
+        .collect();
+    let mut ranked: Vec<(usize, usize, &StoredSuggestion)> = suggestions
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let rank_hint = decisions
+                .get(suggestion.signature.as_str())
+                .and_then(|decision| decision.rank_hint)
+                .unwrap_or(index);
+            (rank_hint, index, suggestion)
+        })
+        .collect();
+
+    ranked.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+    ranked
+        .into_iter()
+        .map(|(_, _, suggestion)| suggestion.clone())
+        .collect()
+}
+
+pub fn rank_stored_suggestions(
+    suggestions: &[StoredSuggestion],
+    client: &dyn IntelligenceClient,
+) -> Result<Vec<StoredSuggestion>> {
+    IntelligenceBoundary::new(client).rank_suggestions(suggestions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,9 +298,26 @@ mod tests {
                             candidate.suggestion.baseline_proposal_text
                         )),
                         usefulness_score: Some(candidate.suggestion.usefulness_score + 0.05),
+                        rank_hint: None,
                     })
                     .collect(),
             })
+        }
+    }
+
+    fn stored_suggestion(signature: &str, score: f64, created_at: &str) -> StoredSuggestion {
+        StoredSuggestion {
+            suggestion_id: if signature.ends_with('a') { 1 } else { 2 },
+            pattern_id: if signature.ends_with('a') { 11 } else { 12 },
+            signature: signature.to_string(),
+            count: 3,
+            avg_duration_ms: 12_000,
+            canonical_summary: "CreateFile -> RenameFile -> MoveFile".to_string(),
+            proposal_text: format!("Proposal for {signature}"),
+            usefulness_score: score,
+            freshness: "current".to_string(),
+            last_seen_at: "2026-01-15T10:00:00+00:00".to_string(),
+            created_at: created_at.to_string(),
         }
     }
 
@@ -274,6 +359,26 @@ mod tests {
     }
 
     #[test]
+    fn maps_stored_suggestions_into_ranking_inputs() {
+        let contexts = map_stored_suggestions_to_contexts(&[stored_suggestion(
+            "CreateFile:invoice-a",
+            0.812,
+            "2026-01-15T10:00:00+00:00",
+        )]);
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(
+            contexts[0].suggestion.pattern_signature,
+            "CreateFile:invoice-a"
+        );
+        assert_eq!(
+            contexts[0].suggestion.baseline_proposal_text,
+            "Proposal for CreateFile:invoice-a"
+        );
+        assert_eq!(contexts[0].history, InternalSuggestionHistory::default());
+    }
+
+    #[test]
     fn boundary_can_be_exercised_without_changing_baseline_behavior() {
         let contexts = map_patterns_to_contexts(&[pattern("CreateFile:invoice", "baseline")]);
         let boundary = IntelligenceBoundary::new(&NoopIntelligenceClient);
@@ -299,12 +404,14 @@ mod tests {
                     action: SuggestionDecisionAction::Keep,
                     proposal_text: Some("refined keep".to_string()),
                     usefulness_score: Some(0.945),
+                    rank_hint: None,
                 },
                 IntelligenceDisplayDecision {
                     pattern_signature: "suppress".to_string(),
                     action: SuggestionDecisionAction::Suppress,
                     proposal_text: None,
                     usefulness_score: Some(0.1),
+                    rank_hint: None,
                 },
             ],
         };
@@ -329,5 +436,56 @@ mod tests {
 
         assert_eq!(presentations[0].proposal_text, "Refined: baseline");
         assert!((presentations[0].usefulness_score - 0.862).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ranking_falls_back_to_baseline_order_without_intelligence() {
+        let suggestions = vec![
+            stored_suggestion("CreateFile:invoice-a", 0.9, "2026-01-15T10:00:00+00:00"),
+            stored_suggestion("CreateFile:invoice-b", 0.8, "2026-01-15T10:05:00+00:00"),
+        ];
+
+        let ranked = rank_stored_suggestions(&suggestions, &NoopIntelligenceClient).unwrap();
+
+        assert_eq!(ranked, suggestions);
+    }
+
+    #[test]
+    fn ranking_uses_intelligence_rank_hints() {
+        struct RankingClient;
+
+        impl IntelligenceClient for RankingClient {
+            fn evaluate(&self, request: &IntelligenceRequest) -> Result<IntelligenceResponse> {
+                Ok(IntelligenceResponse {
+                    decisions: request
+                        .candidates
+                        .iter()
+                        .map(|candidate| IntelligenceDisplayDecision {
+                            pattern_signature: candidate.pattern_signature.clone(),
+                            action: SuggestionDecisionAction::Keep,
+                            proposal_text: None,
+                            usefulness_score: None,
+                            rank_hint: Some(if candidate.pattern_signature.ends_with('b') {
+                                0
+                            } else {
+                                1
+                            }),
+                        })
+                        .collect(),
+                })
+            }
+        }
+
+        let suggestions = vec![
+            stored_suggestion("CreateFile:invoice-a", 0.9, "2026-01-15T10:00:00+00:00"),
+            stored_suggestion("CreateFile:invoice-b", 0.8, "2026-01-15T10:05:00+00:00"),
+        ];
+
+        let first = rank_stored_suggestions(&suggestions, &RankingClient).unwrap();
+        let second = rank_stored_suggestions(&suggestions, &RankingClient).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first[0].signature, "CreateFile:invoice-b");
+        assert_eq!(first[1].signature, "CreateFile:invoice-a");
     }
 }
