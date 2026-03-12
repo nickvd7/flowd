@@ -140,6 +140,7 @@ CLI inspection + automation approval
 The system is intentionally modular:
 
 - **flow-adapters** — capture local system events
+- **flow-analysis** — open-core analysis pipeline and optional intelligence boundary
 - **flow-core** — shared domain types
 - **flow-db** — SQLite persistence and migrations
 - **flow-patterns** — normalization, sessions, pattern detection
@@ -194,6 +195,7 @@ Early automation support focuses on safe filesystem operations only.
 
 ```
 flow-core        shared domain types and configuration
+flow-analysis    open-core analysis pipeline and optional intelligence boundary
 flow-daemon      background event watcher
 flow-cli         command line interface
 flow-db          SQLite persistence and migrations

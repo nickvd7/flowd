@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/flow-core",
+  "crates/flow-analysis",
   "crates/flow-daemon",
   "crates/flow-cli",
   "crates/flow-db",

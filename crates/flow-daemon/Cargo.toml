@@ -8,9 +8,9 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 flow-adapters = { path = "../flow-adapters" }
+flow-analysis = { path = "../flow-analysis" }
 flow-core = { path = "../flow-core" }
 flow-db = { path = "../flow-db" }
-flow-patterns = { path = "../flow-patterns" }
 rusqlite.workspace = true
 serde_json.workspace = true
 
