@@ -280,6 +280,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
 ]
@@ -290,6 +291,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "clap",
  "flow-adapters",
  "flow-analysis",
  "flow-core",

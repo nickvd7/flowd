@@ -6,3 +6,7 @@ observe_active_window = false
 redact_clipboard_content = true
 redact_command_args = true
 strip_browser_query_strings = true
+suggestion_min_usefulness_score = 0.0
+intelligence_enabled = true
+session_inactivity_secs = 300
+file_event_dedup_window_ms = 500

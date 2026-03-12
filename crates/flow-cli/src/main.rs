@@ -5,7 +5,7 @@ use flow_analysis::intelligence_boundary::{
     ExplainabilitySource, IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient,
     SuggestionDecisionAction, SuggestionDisplayResult, SuggestionExplainability,
 };
-use flow_core::config::Config;
+use flow_core::config::{expand_home, Config, ConfigSource, LoadedConfig};
 use flow_db::{
     open_database,
     repo::{
@@ -20,11 +20,13 @@ use flow_exec::{
     execute_automation, list_runs, undo_automation_run,
 };
 use serde_json::Value;
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "flowctl", version, about = "CLI for flowd")]
 struct Cli {
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -32,6 +34,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Status,
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+    },
     Patterns,
     Suggest {
         #[arg(long)]
@@ -86,6 +92,18 @@ enum AutomationsCommand {
     Show { automation_id: i64 },
 }
 
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Show,
+    Validate,
+    Path,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeContext {
+    loaded_config: LoadedConfig,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -95,43 +113,92 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let context = RuntimeContext {
+        loaded_config: load_runtime_config(cli.config.as_deref())?,
+    };
 
     match cli.command {
         Some(Commands::Status) => println!("flowd status: template skeleton"),
-        Some(Commands::Patterns) => render_patterns()?,
-        Some(Commands::Suggest { explain }) => render_suggestions(explain)?,
+        Some(Commands::Config { command }) => render_config_command(&context, command)?,
+        Some(Commands::Patterns) => render_patterns(&context)?,
+        Some(Commands::Suggest { explain }) => render_suggestions(&context, explain)?,
         Some(Commands::Suggestions { command, explain }) => match command {
             Some(SuggestionsCommand::Explain { suggestion_id }) => {
-                explain_suggestion_command(suggestion_id)?
+                explain_suggestion_command(&context, suggestion_id)?
             }
-            None => render_suggestions_table(explain)?,
+            None => render_suggestions_table(&context, explain)?,
         },
-        Some(Commands::Sessions) => render_sessions()?,
+        Some(Commands::Sessions) => render_sessions(&context)?,
         Some(Commands::Tail) => println!("tail: not implemented"),
-        Some(Commands::Approve { suggestion_id }) => approve_automation_command(suggestion_id)?,
-        Some(Commands::Reject { suggestion_id }) => reject_suggestion_command(suggestion_id)?,
-        Some(Commands::Snooze { suggestion_id }) => snooze_suggestion_command(suggestion_id)?,
+        Some(Commands::Approve { suggestion_id }) => {
+            approve_automation_command(&context, suggestion_id)?
+        }
+        Some(Commands::Reject { suggestion_id }) => {
+            reject_suggestion_command(&context, suggestion_id)?
+        }
+        Some(Commands::Snooze { suggestion_id }) => {
+            snooze_suggestion_command(&context, suggestion_id)?
+        }
         Some(Commands::Automations { command }) => match command {
             Some(AutomationsCommand::Show { automation_id }) => {
-                show_automation_command(automation_id)?
+                show_automation_command(&context, automation_id)?
             }
-            None => render_automations()?,
+            None => render_automations(&context)?,
         },
-        Some(Commands::Disable { automation_id }) => disable_automation_command(automation_id)?,
-        Some(Commands::Enable { automation_id }) => enable_automation_command(automation_id)?,
-        Some(Commands::Run { automation_id }) => run_automation_command(automation_id)?,
-        Some(Commands::DryRun { automation_id }) => dry_run_automation_command(automation_id)?,
-        Some(Commands::Runs) => render_runs()?,
-        Some(Commands::Undo { run_id }) => undo_run_command(run_id)?,
+        Some(Commands::Disable { automation_id }) => {
+            disable_automation_command(&context, automation_id)?
+        }
+        Some(Commands::Enable { automation_id }) => {
+            enable_automation_command(&context, automation_id)?
+        }
+        Some(Commands::Run { automation_id }) => run_automation_command(&context, automation_id)?,
+        Some(Commands::DryRun { automation_id }) => {
+            dry_run_automation_command(&context, automation_id)?
+        }
+        Some(Commands::Runs) => render_runs(&context)?,
+        Some(Commands::Undo { run_id }) => undo_run_command(&context, run_id)?,
         None => println!("Use --help to see available commands."),
     }
 
     Ok(())
 }
 
-fn render_suggestions(explain: bool) -> anyhow::Result<()> {
-    let mut conn = open_cli_database()?;
-    let suggestions = suggestion_display_results(&conn, &NoopIntelligenceClient)?;
+fn render_config_command(
+    context: &RuntimeContext,
+    command: Option<ConfigCommand>,
+) -> anyhow::Result<()> {
+    match command.unwrap_or(ConfigCommand::Show) {
+        ConfigCommand::Show => {
+            println!(
+                "source = \"{}\"",
+                render_config_source(&context.loaded_config.source)
+            );
+            println!();
+            print!("{}", context.loaded_config.config.to_pretty_toml()?);
+        }
+        ConfigCommand::Validate => {
+            context.loaded_config.config.validate()?;
+            match &context.loaded_config.source {
+                ConfigSource::File(path) => {
+                    println!("Config is valid: {}", path.display());
+                }
+                ConfigSource::Default => {
+                    println!("Config is valid: built-in defaults");
+                }
+            }
+        }
+        ConfigCommand::Path => match &context.loaded_config.source {
+            ConfigSource::File(path) => println!("{}", path.display()),
+            ConfigSource::Default => println!("built-in defaults"),
+        },
+    }
+
+    Ok(())
+}
+
+fn render_suggestions(context: &RuntimeContext, explain: bool) -> anyhow::Result<()> {
+    let mut conn = open_cli_database(context)?;
+    let suggestions = suggestion_display_results(&conn, context, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -164,8 +231,8 @@ fn render_suggestions(explain: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_patterns() -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn render_patterns(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let patterns = list_patterns(&conn).context("failed to read patterns")?;
 
     if patterns.is_empty() {
@@ -202,9 +269,9 @@ fn render_patterns() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_suggestions_table(explain: bool) -> anyhow::Result<()> {
-    let mut conn = open_cli_database()?;
-    let suggestions = suggestion_display_results(&conn, &NoopIntelligenceClient)?;
+fn render_suggestions_table(context: &RuntimeContext, explain: bool) -> anyhow::Result<()> {
+    let mut conn = open_cli_database(context)?;
+    let suggestions = suggestion_display_results(&conn, context, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -219,9 +286,10 @@ fn render_suggestions_table(explain: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn explain_suggestion_command(suggestion_id: i64) -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
-    let resolved = resolve_suggestion_explanation(&conn, &NoopIntelligenceClient, suggestion_id)?;
+fn explain_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let resolved =
+        resolve_suggestion_explanation(&conn, context, &NoopIntelligenceClient, suggestion_id)?;
 
     for line in render_suggestion_explanation_report(&resolved) {
         println!("{line}");
@@ -230,8 +298,8 @@ fn explain_suggestion_command(suggestion_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_sessions() -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn render_sessions(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let sessions = list_recent_sessions(&conn, 20).context("failed to read sessions")?;
 
     if sessions.is_empty() {
@@ -255,8 +323,8 @@ fn render_sessions() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn approve_automation_command(suggestion_id: i64) -> anyhow::Result<()> {
-    let mut conn = open_cli_database()?;
+fn approve_automation_command(context: &RuntimeContext, suggestion_id: i64) -> anyhow::Result<()> {
+    let mut conn = open_cli_database(context)?;
     let automation_id =
         approve_suggestion(&mut conn, suggestion_id).context("failed to approve suggestion")?;
 
@@ -264,20 +332,20 @@ fn approve_automation_command(suggestion_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn reject_suggestion_command(suggestion_id: i64) -> anyhow::Result<()> {
-    update_suggestion_feedback_status(suggestion_id, "rejected", increment_rejected)?;
+fn reject_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> anyhow::Result<()> {
+    update_suggestion_feedback_status(context, suggestion_id, "rejected", increment_rejected)?;
     println!("Rejected suggestion {suggestion_id}.");
     Ok(())
 }
 
-fn snooze_suggestion_command(suggestion_id: i64) -> anyhow::Result<()> {
-    update_suggestion_feedback_status(suggestion_id, "snoozed", increment_snoozed)?;
+fn snooze_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> anyhow::Result<()> {
+    update_suggestion_feedback_status(context, suggestion_id, "snoozed", increment_snoozed)?;
     println!("Snoozed suggestion {suggestion_id}.");
     Ok(())
 }
 
-fn render_automations() -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn render_automations(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let automations = list_automations(&conn).context("failed to read automations")?;
 
     if automations.is_empty() {
@@ -329,8 +397,8 @@ fn render_automations() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_automation_command(automation_id: i64) -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn show_automation_command(context: &RuntimeContext, automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let automation = get_automation(&conn, automation_id)
         .context("failed to read automation")?
         .ok_or_else(|| anyhow::anyhow!("automation {automation_id} not found"))?;
@@ -343,22 +411,22 @@ fn show_automation_command(automation_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn disable_automation_command(automation_id: i64) -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn disable_automation_command(context: &RuntimeContext, automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     disable_automation(&conn, automation_id).context("failed to disable automation")?;
     println!("Disabled automation {automation_id}.");
     Ok(())
 }
 
-fn enable_automation_command(automation_id: i64) -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn enable_automation_command(context: &RuntimeContext, automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     enable_automation(&conn, automation_id).context("failed to enable automation")?;
     println!("Enabled automation {automation_id}.");
     Ok(())
 }
 
-fn dry_run_automation_command(automation_id: i64) -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn dry_run_automation_command(context: &RuntimeContext, automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let outcome =
         dry_run_automation(&conn, automation_id).context("failed to dry-run automation")?;
 
@@ -369,8 +437,8 @@ fn dry_run_automation_command(automation_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_automation_command(automation_id: i64) -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn run_automation_command(context: &RuntimeContext, automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let report =
         execute_automation(&conn, automation_id).context("failed to execute automation")?;
 
@@ -388,8 +456,8 @@ fn run_automation_command(automation_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_runs() -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn render_runs(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let runs = list_runs(&conn).context("failed to read automation runs")?;
 
     if runs.is_empty() {
@@ -424,8 +492,8 @@ fn render_runs() -> anyhow::Result<()> {
 /// the execution metadata captured when that run finished. The command never
 /// performs bulk undo and will abort if the selected run cannot be reversed
 /// safely.
-fn undo_run_command(run_id: i64) -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+fn undo_run_command(context: &RuntimeContext, run_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
     let outcome = undo_automation_run(&conn, run_id).context("failed to undo automation run")?;
 
     for operation in &outcome.report.operations {
@@ -438,21 +506,31 @@ fn undo_run_command(run_id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn open_cli_database() -> anyhow::Result<rusqlite::Connection> {
+fn open_cli_database(context: &RuntimeContext) -> anyhow::Result<rusqlite::Connection> {
     let db_path = std::env::var("FLOWD_DB_PATH")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| Config::default().database_path);
-    open_database(&db_path).with_context(|| format!("failed to open database at {db_path}"))
+        .unwrap_or_else(|| context.loaded_config.config.database_path.clone());
+    let db_path = expand_home(&db_path);
+    open_database(&db_path)
+        .with_context(|| format!("failed to open database at {}", db_path.display()))
 }
 
 fn suggestion_display_results(
     conn: &rusqlite::Connection,
+    context: &RuntimeContext,
     intelligence_client: &dyn IntelligenceClient,
 ) -> anyhow::Result<Vec<SuggestionDisplayResult>> {
-    let suggestions = list_suggestions(conn).context("failed to read suggestions")?;
+    let suggestions = list_suggestions(conn)
+        .context("failed to read suggestions")?
+        .into_iter()
+        .filter(|suggestion| {
+            suggestion.usefulness_score
+                >= context.loaded_config.config.suggestion_min_usefulness_score
+        })
+        .collect::<Vec<_>>();
 
-    if should_bypass_intelligence_ranking() {
+    if should_bypass_intelligence_ranking(&context.loaded_config.config) {
         return Ok(suggestions
             .into_iter()
             .map(|suggestion| SuggestionDisplayResult {
@@ -479,6 +557,7 @@ struct ResolvedSuggestionExplanation {
 
 fn resolve_suggestion_explanation(
     conn: &rusqlite::Connection,
+    context: &RuntimeContext,
     intelligence_client: &dyn IntelligenceClient,
     suggestion_id: i64,
 ) -> anyhow::Result<ResolvedSuggestionExplanation> {
@@ -488,7 +567,7 @@ fn resolve_suggestion_explanation(
         .find(|suggestion| suggestion.suggestion_id == suggestion_id)
         .cloned()
     {
-        let explainability = if should_bypass_intelligence_ranking() {
+        let explainability = if should_bypass_intelligence_ranking(&context.loaded_config.config) {
             ResolvedSuggestionExplanation {
                 action: SuggestionDecisionAction::Keep,
                 explainability: baseline_fallback_explainability(suggestion.usefulness_score),
@@ -780,11 +859,12 @@ fn mark_suggestions_displayed(
 }
 
 fn update_suggestion_feedback_status(
+    context: &RuntimeContext,
     suggestion_id: i64,
     status: &str,
     increment_feedback: fn(&rusqlite::Connection, i64) -> rusqlite::Result<usize>,
 ) -> anyhow::Result<()> {
-    let mut conn = open_cli_database()?;
+    let mut conn = open_cli_database(context)?;
     let tx = conn
         .transaction()
         .context("failed to start suggestion feedback transaction")?;
@@ -801,7 +881,11 @@ fn update_suggestion_feedback_status(
     Ok(())
 }
 
-fn should_bypass_intelligence_ranking() -> bool {
+fn should_bypass_intelligence_ranking(config: &Config) -> bool {
+    if !config.intelligence_enabled {
+        return true;
+    }
+
     std::env::var("FLOWD_BYPASS_INTELLIGENCE_RANKING")
         .ok()
         .map(|value| {
@@ -809,6 +893,17 @@ fn should_bypass_intelligence_ranking() -> bool {
             normalized == "1" || normalized == "true" || normalized == "yes"
         })
         .unwrap_or(false)
+}
+
+fn load_runtime_config(config_path: Option<&std::path::Path>) -> anyhow::Result<LoadedConfig> {
+    Config::load(config_path).map_err(Into::into)
+}
+
+fn render_config_source(source: &ConfigSource) -> String {
+    match source {
+        ConfigSource::Default => "default".to_string(),
+        ConfigSource::File(path) => path.display().to_string(),
+    }
 }
 
 fn render_pattern_name(signature: &str) -> String {
@@ -1034,14 +1129,25 @@ mod tests {
     #[test]
     fn bypass_flag_disables_intelligence_ranking() {
         // The command path should remain easy to bypass even when a client exists.
+        let config = Config::default();
         unsafe {
             std::env::set_var("FLOWD_BYPASS_INTELLIGENCE_RANKING", "true");
         }
-        assert!(should_bypass_intelligence_ranking());
+        assert!(should_bypass_intelligence_ranking(&config));
         unsafe {
             std::env::remove_var("FLOWD_BYPASS_INTELLIGENCE_RANKING");
         }
-        assert!(!should_bypass_intelligence_ranking());
+        assert!(!should_bypass_intelligence_ranking(&config));
+    }
+
+    #[test]
+    fn config_can_disable_intelligence_without_env_flags() {
+        let config = Config {
+            intelligence_enabled: false,
+            ..Config::default()
+        };
+
+        assert!(should_bypass_intelligence_ranking(&config));
     }
 
     #[test]

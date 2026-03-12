@@ -73,11 +73,37 @@ From this repository, the current daemon binary is:
 flow-daemon
 ```
 
-If you want to change observed folders or the database path, create `flowd.toml` in the project directory.
+`flowd` resolves configuration in this order:
+
+1. `--config <path>` when provided to `flowctl` or `flow-daemon`
+2. `./flowd.toml` in the current working directory
+3. `$XDG_CONFIG_HOME/flowd/config.toml`
+4. `~/.config/flowd/config.toml`
+5. built-in defaults when no config file exists
+
+If you want to change observed folders or runtime behavior, create a config file in one of those locations.
 
 ```toml
 database_path = "./flowd.db"
 observed_folders = ["~/Downloads"]
+observe_clipboard = false
+observe_terminal = true
+observe_active_window = false
+redact_clipboard_content = true
+redact_command_args = true
+strip_browser_query_strings = true
+suggestion_min_usefulness_score = 0.0
+intelligence_enabled = true
+session_inactivity_secs = 300
+file_event_dedup_window_ms = 500
+```
+
+You can inspect or validate the resolved config from the terminal:
+
+```bash
+flowctl config show
+flowctl config validate
+flowctl config path
 ```
 
 ### Inspect suggestions
