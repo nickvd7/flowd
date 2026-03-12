@@ -2,19 +2,22 @@ mod observation;
 
 use anyhow::{Context, Result};
 use chrono::Duration;
+use clap::Parser;
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
 use flow_analysis::catch_up_analysis;
-use flow_core::config::Config;
+use flow_core::config::{expand_home, Config};
 use flow_db::open_database as open_sqlite_database;
 use observation::ObservationPipeline;
 use rusqlite::Connection;
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
-const FILE_EVENT_DEDUP_WINDOW_MS: i64 = 500;
-const SESSION_INACTIVITY_SECS: i64 = 300;
+
+#[derive(Debug, Parser)]
+#[command(name = "flow-daemon", version, about = "Daemon for flowd")]
+struct Cli {
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -24,16 +27,18 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let config = load_config().context("failed to load daemon config")?;
+    let cli = Cli::parse();
+    let loaded = Config::load(cli.config.as_deref()).context("failed to load daemon config")?;
+    let config = loaded.config;
     let observed_paths = resolve_observed_paths(&config)?;
     let mut conn = open_database(&config).context("failed to initialize daemon database")?;
 
-    catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
+    catch_up_analysis(&mut conn, config.session_inactivity_secs)
         .context("failed to catch up analysis state")?;
 
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
     let mut observation =
-        ObservationPipeline::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+        ObservationPipeline::new(Duration::milliseconds(config.file_event_dedup_window_ms));
 
     for path in &observed_paths {
         watch_path(&mut watcher, path)
@@ -52,7 +57,7 @@ fn run() -> Result<()> {
                         continue;
                     };
 
-                    catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
+                    catch_up_analysis(&mut conn, config.session_inactivity_secs)
                         .context("failed during analysis refresh")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
@@ -62,15 +67,6 @@ fn run() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn load_config() -> Result<Config> {
-    let path = Path::new("flowd.toml");
-    if path.exists() {
-        return Config::load_from_path(path).map_err(Into::into);
-    }
-
-    Ok(Config::default())
 }
 
 fn resolve_observed_paths(config: &Config) -> Result<Vec<PathBuf>> {
@@ -99,24 +95,6 @@ fn open_database(config: &Config) -> Result<Connection> {
     open_sqlite_database(&db_path)
 }
 
-fn expand_home(raw: &str) -> PathBuf {
-    if raw == "~" {
-        return home_dir().unwrap_or_else(|| PathBuf::from(raw));
-    }
-
-    if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
-            return home.join(stripped);
-        }
-    }
-
-    PathBuf::from(raw)
-}
-
-fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(PathBuf::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,9 +104,12 @@ mod tests {
     use observation::RecentFileEventDeduper;
     use tempfile::tempdir;
 
+    const DEFAULT_FILE_EVENT_DEDUP_WINDOW_MS: i64 = 500;
+    const DEFAULT_SESSION_INACTIVITY_SECS: i64 = 300;
+
     #[test]
     fn expands_tilde_prefixed_paths() {
-        let home = home_dir().unwrap();
+        let home = flow_core::config::home_dir().unwrap();
         assert_eq!(expand_home("~/Downloads"), home.join("Downloads"));
     }
 
@@ -301,8 +282,8 @@ mod tests {
         }
 
         flow_analysis::normalize_pending_raw_events(&mut conn).unwrap();
-        flow_analysis::refresh_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
-        flow_analysis::refresh_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
+        flow_analysis::refresh_analysis_state(&mut conn, DEFAULT_SESSION_INACTIVITY_SECS).unwrap();
+        flow_analysis::refresh_analysis_state(&mut conn, DEFAULT_SESSION_INACTIVITY_SECS).unwrap();
 
         let pattern_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))
@@ -323,7 +304,7 @@ mod tests {
     fn suppresses_duplicate_file_events_within_window() {
         let ts = Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap();
         let mut deduper =
-            RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+            RecentFileEventDeduper::new(Duration::milliseconds(DEFAULT_FILE_EVENT_DEDUP_WINDOW_MS));
         let first = FileEvent {
             ts,
             kind: FileEventKind::Rename,
@@ -343,7 +324,7 @@ mod tests {
     fn keeps_matching_file_events_outside_window() {
         let ts = Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap();
         let mut deduper =
-            RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+            RecentFileEventDeduper::new(Duration::milliseconds(DEFAULT_FILE_EVENT_DEDUP_WINDOW_MS));
         let first = FileEvent {
             ts,
             kind: FileEventKind::Create,
@@ -351,7 +332,7 @@ mod tests {
             from_path: None,
         };
         let later = FileEvent {
-            ts: ts + Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS + 1),
+            ts: ts + Duration::milliseconds(DEFAULT_FILE_EVENT_DEDUP_WINDOW_MS + 1),
             ..first.clone()
         };
 
@@ -363,7 +344,7 @@ mod tests {
     fn keeps_events_with_different_sources_inside_window() {
         let ts = Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap();
         let mut deduper =
-            RecentFileEventDeduper::new(Duration::milliseconds(FILE_EVENT_DEDUP_WINDOW_MS));
+            RecentFileEventDeduper::new(Duration::milliseconds(DEFAULT_FILE_EVENT_DEDUP_WINDOW_MS));
         let first = FileEvent {
             ts,
             kind: FileEventKind::Move,
