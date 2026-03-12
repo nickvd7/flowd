@@ -155,6 +155,12 @@ For the full architecture description see:
 docs/architecture.md
 ```
 
+Start with the canonical system overview if you are new to the repo:
+
+```
+docs/system-overview.md
+```
+
 ---
 
 ## Current capabilities
