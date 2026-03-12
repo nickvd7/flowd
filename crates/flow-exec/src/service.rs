@@ -12,7 +12,10 @@ use flow_db::repo::{
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
 use rusqlite::Connection;
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 #[derive(Debug, Clone)]
 pub struct DryRunOutcome {
@@ -24,6 +27,40 @@ pub struct DryRunOutcome {
 pub struct UndoOutcome {
     pub source_run_id: i64,
     pub report: ExecutionReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationPreview {
+    pub estimated_affected_files: Option<usize>,
+    pub exact_count: bool,
+    pub examples: Vec<PreviewExample>,
+    pub destination_paths: Vec<String>,
+    pub action_summary: Vec<String>,
+    pub risk: PreviewRisk,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewExample {
+    pub before: String,
+    pub after: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl PreviewRisk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PreviewRisk::Low => "low",
+            PreviewRisk::Medium => "medium",
+            PreviewRisk::High => "high",
+        }
+    }
 }
 
 /// The execution layer owns approval, planning, execution, and
@@ -97,6 +134,27 @@ pub fn execute_automation(conn: &Connection, automation_id: i64) -> Result<Execu
 
 pub fn list_runs(conn: &Connection) -> Result<Vec<StoredAutomationRun>> {
     list_automation_runs(conn).context("failed to read automation runs")
+}
+
+pub fn preview_automation(conn: &Connection, automation_id: i64) -> Result<AutomationPreview> {
+    let spec = load_automation_spec(conn, automation_id)?;
+    Ok(build_preview(&spec, None))
+}
+
+pub fn preview_suggestion(conn: &Connection, suggestion_id: i64) -> Result<AutomationPreview> {
+    let suggestion = get_suggestion(conn, suggestion_id)
+        .context("failed to read suggestion")?
+        .ok_or_else(|| anyhow!("suggestion {suggestion_id} not found"))?;
+    let events = load_example_events_for_pattern(conn, suggestion.pattern_id)
+        .context("failed to load example events for suggestion")?;
+
+    match compile_automation_spec(&suggestion.proposal_text, &events) {
+        Ok(spec) => Ok(build_preview(&spec, Some(&events))),
+        Err(error) => Ok(best_effort_preview_without_spec(
+            &events,
+            vec![format!("Best-effort preview only: {error}")],
+        )),
+    }
 }
 
 /// Undo is explicit and per-run: `flow-cli undo <run_id>` only targets one
@@ -395,6 +453,103 @@ fn compile_automation_spec(summary: &str, events: &[NormalizedEvent]) -> Result<
     })
 }
 
+fn build_preview(
+    spec: &AutomationSpec,
+    example_events: Option<&[NormalizedEvent]>,
+) -> AutomationPreview {
+    let action_summary = action_summary_from_spec(spec);
+    let destination_paths_from_spec = destination_paths_from_spec(spec);
+
+    match plan(spec) {
+        Ok(report) => {
+            let mut notes = Vec::new();
+            let estimated_affected_files = Some(count_affected_files(&report));
+            let exact_count = true;
+            let destination_paths = if report.operations.is_empty() {
+                destination_paths_from_spec
+            } else {
+                destination_paths_from_report(&report)
+            };
+            let examples = if report.operations.is_empty() {
+                let fallback = example_events
+                    .map(preview_examples_from_events)
+                    .unwrap_or_default();
+                if !fallback.is_empty() {
+                    notes.push(
+                        "No matching files are currently available; examples come from stored workflow history."
+                            .to_string(),
+                    );
+                }
+                fallback
+            } else {
+                preview_examples_from_report(&report)
+            };
+
+            AutomationPreview {
+                estimated_affected_files,
+                exact_count,
+                examples,
+                destination_paths,
+                action_summary: action_summary.clone(),
+                risk: assess_risk(spec, estimated_affected_files, exact_count),
+                notes,
+            }
+        }
+        Err(error) => {
+            let mut notes = vec![format!("Best-effort preview only: {error}")];
+            let event_examples = example_events
+                .map(preview_examples_from_events)
+                .unwrap_or_default();
+            if event_examples.is_empty() {
+                notes.push(
+                    "No representative examples are available from stored workflow history."
+                        .to_string(),
+                );
+            }
+
+            AutomationPreview {
+                estimated_affected_files: None,
+                exact_count: false,
+                examples: event_examples,
+                destination_paths: example_events
+                    .map(destination_paths_from_events)
+                    .filter(|paths| !paths.is_empty())
+                    .unwrap_or(destination_paths_from_spec),
+                action_summary,
+                risk: assess_risk(spec, None, false),
+                notes,
+            }
+        }
+    }
+}
+
+fn best_effort_preview_without_spec(
+    events: &[NormalizedEvent],
+    mut notes: Vec<String>,
+) -> AutomationPreview {
+    let action_summary = action_summary_from_events(events);
+    let examples = preview_examples_from_events(events);
+    let destination_paths = destination_paths_from_events(events);
+
+    if events.is_empty() {
+        notes.push("No stored example events are available for this suggestion.".to_string());
+    }
+
+    AutomationPreview {
+        estimated_affected_files: None,
+        exact_count: false,
+        examples,
+        destination_paths,
+        action_summary,
+        risk: if events.is_empty() {
+            PreviewRisk::High
+        } else {
+            PreviewRisk::Medium
+        },
+        notes,
+    }
+}
+
 fn compile_rename_template(from_path: &str, to_path: &str) -> Result<String> {
     let from = Path::new(from_path);
     let to = Path::new(to_path);
@@ -443,4 +598,364 @@ fn sanitize_id(summary: &str) -> String {
     }
 
     id.trim_matches('_').to_string()
+}
+
+fn action_summary_from_spec(spec: &AutomationSpec) -> Vec<String> {
+    let mut actions = Vec::new();
+    for action in &spec.actions {
+        let label = match action {
+            Action::Rename { .. } => "rename",
+            Action::Move { .. } => "move",
+        };
+        if !actions.iter().any(|value| value == label) {
+            actions.push(label.to_string());
+        }
+    }
+    actions
+}
+
+fn action_summary_from_events(events: &[NormalizedEvent]) -> Vec<String> {
+    let mut actions = Vec::new();
+    for event in events {
+        let label = match event.action_type {
+            ActionType::RenameFile => Some("rename"),
+            ActionType::MoveFile => Some("move"),
+            _ => None,
+        };
+        if let Some(label) = label {
+            if !actions.iter().any(|value| value == label) {
+                actions.push(label.to_string());
+            }
+        }
+    }
+    actions
+}
+
+fn destination_paths_from_spec(spec: &AutomationSpec) -> Vec<String> {
+    let mut destinations = BTreeSet::new();
+    for action in &spec.actions {
+        if let Action::Move { destination } = action {
+            destinations.insert(destination.clone());
+        }
+    }
+    destinations.into_iter().collect()
+}
+
+fn destination_paths_from_report(report: &ExecutionReport) -> Vec<String> {
+    let mut destinations = BTreeSet::new();
+    for final_path in final_destination_paths(report) {
+        if let Some(parent) = Path::new(&final_path).parent() {
+            destinations.insert(parent.display().to_string());
+        }
+    }
+    destinations.into_iter().collect()
+}
+
+fn destination_paths_from_events(events: &[NormalizedEvent]) -> Vec<String> {
+    let mut move_destinations = BTreeSet::new();
+    let mut other_destinations = BTreeSet::new();
+    for event in events {
+        if let Some(target) = event.target.as_deref() {
+            match event.action_type {
+                ActionType::MoveFile => {
+                    if let Some(parent) = Path::new(target).parent() {
+                        move_destinations.insert(parent.display().to_string());
+                    }
+                }
+                ActionType::RenameFile => {
+                    if let Some(parent) = Path::new(target).parent() {
+                        other_destinations.insert(parent.display().to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if move_destinations.is_empty() {
+        other_destinations.into_iter().collect()
+    } else {
+        move_destinations.into_iter().collect()
+    }
+}
+
+fn count_affected_files(report: &ExecutionReport) -> usize {
+    if report.operations.is_empty() {
+        return 0;
+    }
+
+    let destinations: BTreeSet<&str> = report
+        .operations
+        .iter()
+        .map(|operation| operation.to.as_str())
+        .collect();
+    report
+        .operations
+        .iter()
+        .filter(|operation| !destinations.contains(operation.from.as_str()))
+        .count()
+}
+
+fn preview_examples_from_report(report: &ExecutionReport) -> Vec<PreviewExample> {
+    let finals = final_destination_map(report);
+    finals
+        .into_iter()
+        .take(2)
+        .map(|(before, after)| PreviewExample {
+            before: file_label(&before),
+            after: file_label(&after),
+        })
+        .collect()
+}
+
+fn preview_examples_from_events(events: &[NormalizedEvent]) -> Vec<PreviewExample> {
+    let Some(before) = events.iter().find_map(|event| {
+        (event.action_type == ActionType::CreateFile)
+            .then_some(event.target.as_deref())
+            .flatten()
+    }) else {
+        return Vec::new();
+    };
+
+    let after = events
+        .iter()
+        .rev()
+        .find_map(|event| event.target.as_deref())
+        .unwrap_or(before);
+
+    vec![PreviewExample {
+        before: file_label(before),
+        after: file_label(after),
+    }]
+}
+
+fn final_destination_paths(report: &ExecutionReport) -> Vec<String> {
+    final_destination_map(report).into_values().collect()
+}
+
+fn final_destination_map(report: &ExecutionReport) -> BTreeMap<String, String> {
+    let from_to: BTreeMap<&str, &str> = report
+        .operations
+        .iter()
+        .map(|operation| (operation.from.as_str(), operation.to.as_str()))
+        .collect();
+    let destinations: BTreeSet<&str> = report
+        .operations
+        .iter()
+        .map(|operation| operation.to.as_str())
+        .collect();
+    let mut finals = BTreeMap::new();
+
+    for operation in &report.operations {
+        if destinations.contains(operation.from.as_str()) {
+            continue;
+        }
+
+        let mut final_path = operation.to.as_str();
+        while let Some(next) = from_to.get(final_path) {
+            final_path = next;
+        }
+        finals.insert(operation.from.clone(), final_path.to_string());
+    }
+
+    finals
+}
+
+fn file_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn assess_risk(
+    spec: &AutomationSpec,
+    estimated_affected_files: Option<usize>,
+    exact_count: bool,
+) -> PreviewRisk {
+    let Some(safety) = spec.safety.as_ref() else {
+        return PreviewRisk::High;
+    };
+
+    if !safety.dry_run_first || !safety.undo_log {
+        return PreviewRisk::High;
+    }
+
+    if !exact_count {
+        return PreviewRisk::Medium;
+    }
+
+    match estimated_affected_files.unwrap_or(0) {
+        0..=25 => PreviewRisk::Low,
+        26..=100 => PreviewRisk::Medium,
+        _ => PreviewRisk::High,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    fn invoice_event(
+        action_type: ActionType,
+        target: &str,
+        from_path: Option<&str>,
+    ) -> NormalizedEvent {
+        let mut metadata = serde_json::Map::new();
+        if let Some(from_path) = from_path {
+            metadata.insert("from_path".to_string(), json!(from_path));
+        }
+
+        NormalizedEvent {
+            ts: Utc.with_ymd_and_hms(2026, 3, 12, 12, 0, 0).unwrap(),
+            action_type,
+            app: Some("finder".to_string()),
+            target: Some(target.to_string()),
+            metadata: serde_json::Value::Object(metadata),
+        }
+    }
+
+    fn invoice_spec(source: &Path, destination: &Path) -> AutomationSpec {
+        AutomationSpec {
+            id: "invoice".to_string(),
+            trigger: Trigger {
+                r#type: "file_created".to_string(),
+                path: Some(source.display().to_string()),
+                extension: Some("pdf".to_string()),
+                name_contains: Some("invoice".to_string()),
+            },
+            actions: vec![
+                Action::Rename {
+                    template: "{stem}-reviewed.{ext}".to_string(),
+                },
+                Action::Move {
+                    destination: destination.display().to_string(),
+                },
+            ],
+            safety: Some(Safety {
+                dry_run_first: true,
+                undo_log: true,
+            }),
+        }
+    }
+
+    #[test]
+    fn preview_generation_uses_exact_plan_when_files_match() {
+        let dir = tempdir().unwrap();
+        let inbox = dir.path().join("inbox");
+        let archive = dir.path().join("archive");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("invoice-1001.pdf"), "invoice").unwrap();
+        std::fs::write(inbox.join("invoice-1002.pdf"), "invoice").unwrap();
+
+        let preview = build_preview(&invoice_spec(&inbox, &archive), None);
+
+        assert_eq!(preview.estimated_affected_files, Some(2));
+        assert!(preview.exact_count);
+        assert_eq!(preview.examples.len(), 2);
+        assert_eq!(preview.examples[0].before, "invoice-1001.pdf");
+        assert_eq!(preview.examples[0].after, "invoice-1001-reviewed.pdf");
+        assert_eq!(
+            preview.destination_paths,
+            vec![archive.display().to_string()]
+        );
+        assert_eq!(preview.action_summary, vec!["rename", "move"]);
+        assert_eq!(preview.risk, PreviewRisk::Low);
+    }
+
+    #[test]
+    fn preview_generation_falls_back_to_history_when_current_context_is_missing() {
+        let dir = tempdir().unwrap();
+        let inbox = dir.path().join("missing-inbox");
+        let archive = dir.path().join("archive");
+        let preview = build_preview(
+            &invoice_spec(&inbox, &archive),
+            Some(&[
+                invoice_event(ActionType::CreateFile, "/tmp/inbox/invoice-1001.pdf", None),
+                invoice_event(
+                    ActionType::RenameFile,
+                    "/tmp/inbox/invoice-1001-reviewed.pdf",
+                    Some("/tmp/inbox/invoice-1001.pdf"),
+                ),
+                invoice_event(
+                    ActionType::MoveFile,
+                    "/tmp/archive/invoice-1001-reviewed.pdf",
+                    Some("/tmp/inbox/invoice-1001-reviewed.pdf"),
+                ),
+            ]),
+        );
+
+        assert_eq!(preview.estimated_affected_files, None);
+        assert!(!preview.exact_count);
+        assert_eq!(
+            preview.examples,
+            vec![PreviewExample {
+                before: "invoice-1001.pdf".to_string(),
+                after: "invoice-1001-reviewed.pdf".to_string(),
+            }]
+        );
+        assert_eq!(preview.destination_paths, vec!["/tmp/archive".to_string()]);
+        assert_eq!(preview.risk, PreviewRisk::Medium);
+        assert!(preview.notes[0].starts_with("Best-effort preview only:"));
+    }
+
+    #[test]
+    fn best_effort_preview_without_context_is_explicit() {
+        let preview = best_effort_preview_without_spec(
+            &[],
+            vec!["Best-effort preview only: no example events available".to_string()],
+        );
+
+        assert_eq!(preview.estimated_affected_files, None);
+        assert!(preview.examples.is_empty());
+        assert!(preview.destination_paths.is_empty());
+        assert!(preview.action_summary.is_empty());
+        assert_eq!(preview.risk, PreviewRisk::High);
+        assert_eq!(preview.notes.len(), 2);
+    }
+
+    #[test]
+    fn preview_examples_from_report_are_stable() {
+        let report = ExecutionReport {
+            operations: vec![
+                crate::engine::PlannedOperation {
+                    action: "rename".to_string(),
+                    from: "/tmp/inbox/invoice-1002.pdf".to_string(),
+                    to: "/tmp/inbox/invoice-1002-reviewed.pdf".to_string(),
+                },
+                crate::engine::PlannedOperation {
+                    action: "move".to_string(),
+                    from: "/tmp/inbox/invoice-1002-reviewed.pdf".to_string(),
+                    to: "/tmp/archive/invoice-1002-reviewed.pdf".to_string(),
+                },
+                crate::engine::PlannedOperation {
+                    action: "rename".to_string(),
+                    from: "/tmp/inbox/invoice-1001.pdf".to_string(),
+                    to: "/tmp/inbox/invoice-1001-reviewed.pdf".to_string(),
+                },
+                crate::engine::PlannedOperation {
+                    action: "move".to_string(),
+                    from: "/tmp/inbox/invoice-1001-reviewed.pdf".to_string(),
+                    to: "/tmp/archive/invoice-1001-reviewed.pdf".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            preview_examples_from_report(&report),
+            vec![
+                PreviewExample {
+                    before: "invoice-1001.pdf".to_string(),
+                    after: "invoice-1001-reviewed.pdf".to_string(),
+                },
+                PreviewExample {
+                    before: "invoice-1002.pdf".to_string(),
+                    after: "invoice-1002-reviewed.pdf".to_string(),
+                },
+            ]
+        );
+    }
 }

@@ -17,7 +17,8 @@ use flow_db::{
 use flow_dsl::{Action, AutomationSpec};
 use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
-    execute_automation, list_runs, undo_automation_run,
+    execute_automation, list_runs, preview_automation, preview_suggestion, undo_automation_run,
+    AutomationPreview,
 };
 use serde_json::Value;
 use std::{fmt::Display, path::PathBuf};
@@ -290,8 +291,10 @@ fn explain_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> a
     let conn = open_cli_database(context)?;
     let resolved =
         resolve_suggestion_explanation(&conn, context, &NoopIntelligenceClient, suggestion_id)?;
+    let preview =
+        preview_suggestion(&conn, suggestion_id).context("failed to preview suggestion impact")?;
 
-    for line in render_suggestion_explanation_report(&resolved) {
+    for line in render_suggestion_explanation_report(&resolved, &preview) {
         println!("{line}");
     }
 
@@ -403,8 +406,10 @@ fn show_automation_command(context: &RuntimeContext, automation_id: i64) -> anyh
         .context("failed to read automation")?
         .ok_or_else(|| anyhow::anyhow!("automation {automation_id} not found"))?;
     let spec = flow_dsl::parse_spec(&automation.spec_yaml).context("failed to parse automation")?;
+    let preview =
+        preview_automation(&conn, automation_id).context("failed to preview automation impact")?;
 
-    for line in render_automation_report(&automation, &spec) {
+    for line in render_automation_report(&automation, &spec, &preview) {
         println!("{line}");
     }
 
@@ -601,7 +606,10 @@ fn resolve_suggestion_explanation(
     anyhow::bail!("suggestion {suggestion_id} not found");
 }
 
-fn render_suggestion_explanation_report(resolved: &ResolvedSuggestionExplanation) -> Vec<String> {
+fn render_suggestion_explanation_report(
+    resolved: &ResolvedSuggestionExplanation,
+    preview: &AutomationPreview,
+) -> Vec<String> {
     let suggestion = &resolved.suggestion;
     let explainability = &resolved.explainability;
     let mut lines = vec![
@@ -675,6 +683,9 @@ fn render_suggestion_explanation_report(resolved: &ResolvedSuggestionExplanation
     if let Some(value) = &suggestion.last_snoozed_ts {
         lines.push(format!("last_snoozed: {}", format_timestamp(value)));
     }
+
+    lines.push(String::new());
+    lines.extend(render_automation_preview(preview));
 
     lines
 }
@@ -1251,7 +1262,7 @@ mod tests {
             },
         };
 
-        let lines = render_suggestion_explanation_report(&resolved);
+        let lines = render_suggestion_explanation_report(&resolved, &sample_preview());
 
         assert!(lines.contains(&"decision: delayed".to_string()));
         assert!(lines.contains(&"source: intelligence".to_string()));
@@ -1286,12 +1297,62 @@ mod tests {
             },
         };
 
-        let lines = render_suggestion_explanation_report(&resolved);
+        let lines = render_suggestion_explanation_report(&resolved, &sample_preview());
 
         assert!(lines.contains(&"decision: suppressed".to_string()));
         assert!(lines
             .contains(&"suppression_reason: A similar suggestion is already active.".to_string()));
         assert!(lines.contains(&"  clustering=Similar suggestions were clustered.".to_string()));
+    }
+
+    #[test]
+    fn automation_preview_rendering_is_stable_and_compact() {
+        let lines = render_automation_preview(&sample_preview());
+
+        assert_eq!(
+            lines,
+            vec![
+                "Automation preview".to_string(),
+                String::new(),
+                "Estimated impact:".to_string(),
+                "- affects 2 files".to_string(),
+                String::new(),
+                "Examples:".to_string(),
+                "- invoice-1001.pdf -> invoice-1001-reviewed.pdf".to_string(),
+                "- invoice-1002.pdf -> invoice-1002-reviewed.pdf".to_string(),
+                String::new(),
+                "Destination:".to_string(),
+                "- /tmp/archive".to_string(),
+                String::new(),
+                "Risk:".to_string(),
+                "- low".to_string(),
+                String::new(),
+                "Action summary:".to_string(),
+                "- rename".to_string(),
+                "- move".to_string(),
+            ]
+        );
+    }
+
+    fn sample_preview() -> AutomationPreview {
+        AutomationPreview {
+            estimated_affected_files: Some(2),
+            exact_count: true,
+            examples: vec![
+                flow_exec::PreviewExample {
+                    before: "invoice-1001.pdf".to_string(),
+                    after: "invoice-1001-reviewed.pdf".to_string(),
+                },
+                flow_exec::PreviewExample {
+                    before: "invoice-1002.pdf".to_string(),
+                    after: "invoice-1002-reviewed.pdf".to_string(),
+                },
+            ],
+            destination_paths: vec!["/tmp/archive".to_string()],
+            action_summary: vec!["rename".to_string(), "move".to_string()],
+            risk: flow_exec::PreviewRisk::Low,
+            notes: Vec::new(),
+        }
     }
 }
 
@@ -1321,6 +1382,7 @@ fn summarize_run_operations(payload: Option<&str>) -> usize {
 fn render_automation_report(
     automation: &flow_db::repo::StoredAutomationSpec,
     spec: &AutomationSpec,
+    preview: &AutomationPreview,
 ) -> Vec<String> {
     let mut lines = vec![
         format!("automation: {}", automation.automation_id),
@@ -1375,6 +1437,75 @@ fn render_automation_report(
         lines.push(format!("  undo_log: {}", safety.undo_log));
     } else {
         lines.push("  - none".to_string());
+    }
+
+    lines.push(String::new());
+    lines.extend(render_automation_preview(preview));
+
+    lines
+}
+
+fn render_automation_preview(preview: &AutomationPreview) -> Vec<String> {
+    let mut lines = vec![
+        "Automation preview".to_string(),
+        String::new(),
+        "Estimated impact:".to_string(),
+    ];
+
+    let impact_line = match preview.estimated_affected_files {
+        Some(count) if preview.exact_count => format!("- affects {count} files"),
+        Some(count) => format!("- affects approximately {count} files"),
+        None => "- affected file count unavailable".to_string(),
+    };
+    lines.push(impact_line);
+
+    lines.push(String::new());
+    lines.push("Examples:".to_string());
+    if preview.examples.is_empty() {
+        lines.push("- no representative examples available".to_string());
+    } else {
+        lines.extend(
+            preview
+                .examples
+                .iter()
+                .map(|example| format!("- {} -> {}", example.before, example.after)),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("Destination:".to_string());
+    if preview.destination_paths.is_empty() {
+        lines.push("- destination unavailable".to_string());
+    } else {
+        lines.extend(
+            preview
+                .destination_paths
+                .iter()
+                .map(|destination| format!("- {destination}")),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("Risk:".to_string());
+    lines.push(format!("- {}", preview.risk.as_str()));
+
+    lines.push(String::new());
+    lines.push("Action summary:".to_string());
+    if preview.action_summary.is_empty() {
+        lines.push("- action summary unavailable".to_string());
+    } else {
+        lines.extend(
+            preview
+                .action_summary
+                .iter()
+                .map(|action| format!("- {action}")),
+        );
+    }
+
+    if !preview.notes.is_empty() {
+        lines.push(String::new());
+        lines.push("Notes:".to_string());
+        lines.extend(preview.notes.iter().map(|note| format!("- {note}")));
     }
 
     lines

@@ -10,6 +10,7 @@ use flow_db::{
     },
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
+use flow_exec::preview_automation;
 use flow_patterns::normalize::normalize;
 use rusqlite::Connection;
 use std::{path::Path, process::Command};
@@ -340,12 +341,61 @@ fn automations_show_renders_detailed_report() {
     let conn = Connection::open(&db_path).unwrap();
     let automation = get_automation(&conn, 1).unwrap().unwrap();
     let spec = flow_dsl::parse_spec(&automation.spec_yaml).unwrap();
-    let expected = format_automation_report(&automation, &spec);
+    let preview = preview_automation(&conn, 1).unwrap();
+    let expected = format_automation_report(&automation, &spec, &preview);
     assert_eq!(stdout, expected);
     assert!(stdout.contains("trigger:"));
     assert!(stdout.contains("actions:"));
+    assert!(stdout.contains("Automation preview"));
     assert!(stdout.contains("rename template="));
     assert!(stdout.contains("move destination="));
+}
+
+#[test]
+fn automations_show_preview_is_deterministic() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+    approve_suggestion(&db_path);
+
+    std::fs::create_dir_all(temp_dir.path().join("inbox")).unwrap();
+    std::fs::write(temp_dir.path().join("inbox/invoice-1009.pdf"), "invoice").unwrap();
+
+    let first = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["automations", "show", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    let second = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["automations", "show", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(first.status.success());
+    assert!(second.status.success());
+    assert_eq!(first.stdout, second.stdout);
+}
+
+#[test]
+fn automations_show_preview_handles_missing_context_without_failing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    let missing_inbox = temp_dir.path().join("missing");
+    let archive = temp_dir.path().join("archive");
+    seed_manual_automation(&db_path, rename_and_move_spec(&missing_inbox, &archive));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["automations", "show", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Automation preview"));
+    assert!(stdout.contains("affected file count unavailable"));
+    assert!(stdout.contains("Best-effort preview only:"));
 }
 
 #[test]
@@ -940,6 +990,7 @@ fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
 fn format_automation_report(
     automation: &flow_db::repo::StoredAutomationSpec,
     spec: &AutomationSpec,
+    preview: &flow_exec::AutomationPreview,
 ) -> String {
     let mut lines = vec![
         format!("automation: {}", automation.automation_id),
@@ -996,7 +1047,75 @@ fn format_automation_report(
         lines.push("  - none".to_string());
     }
 
+    lines.push(String::new());
+    lines.extend(render_automation_preview(preview));
+
     format!("{}\n", lines.join("\n"))
+}
+
+fn render_automation_preview(preview: &flow_exec::AutomationPreview) -> Vec<String> {
+    let mut lines = vec![
+        "Automation preview".to_string(),
+        String::new(),
+        "Estimated impact:".to_string(),
+    ];
+
+    lines.push(match preview.estimated_affected_files {
+        Some(count) if preview.exact_count => format!("- affects {count} files"),
+        Some(count) => format!("- affects approximately {count} files"),
+        None => "- affected file count unavailable".to_string(),
+    });
+
+    lines.push(String::new());
+    lines.push("Examples:".to_string());
+    if preview.examples.is_empty() {
+        lines.push("- no representative examples available".to_string());
+    } else {
+        lines.extend(
+            preview
+                .examples
+                .iter()
+                .map(|example| format!("- {} -> {}", example.before, example.after)),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("Destination:".to_string());
+    if preview.destination_paths.is_empty() {
+        lines.push("- destination unavailable".to_string());
+    } else {
+        lines.extend(
+            preview
+                .destination_paths
+                .iter()
+                .map(|destination| format!("- {destination}")),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("Risk:".to_string());
+    lines.push(format!("- {}", preview.risk.as_str()));
+
+    lines.push(String::new());
+    lines.push("Action summary:".to_string());
+    if preview.action_summary.is_empty() {
+        lines.push("- action summary unavailable".to_string());
+    } else {
+        lines.extend(
+            preview
+                .action_summary
+                .iter()
+                .map(|action| format!("- {action}")),
+        );
+    }
+
+    if !preview.notes.is_empty() {
+        lines.push(String::new());
+        lines.push("Notes:".to_string());
+        lines.extend(preview.notes.iter().map(|note| format!("- {note}")));
+    }
+
+    lines
 }
 
 fn format_row<'a, I, T>(values: I, widths: &[usize]) -> String
@@ -1126,6 +1245,30 @@ fn rename_only_spec(inbox: &Path) -> AutomationSpec {
         actions: vec![Action::Rename {
             template: "{stem}-reviewed.{ext}".to_string(),
         }],
+        safety: Some(Safety {
+            dry_run_first: true,
+            undo_log: true,
+        }),
+    }
+}
+
+fn rename_and_move_spec(inbox: &Path, archive: &Path) -> AutomationSpec {
+    AutomationSpec {
+        id: "rename_and_move".to_string(),
+        trigger: Trigger {
+            r#type: "file_created".to_string(),
+            path: Some(inbox.display().to_string()),
+            extension: Some("pdf".to_string()),
+            name_contains: Some("invoice".to_string()),
+        },
+        actions: vec![
+            Action::Rename {
+                template: "{stem}-reviewed.{ext}".to_string(),
+            },
+            Action::Move {
+                destination: archive.display().to_string(),
+            },
+        ],
         safety: Some(Safety {
             dry_run_first: true,
             undo_log: true,

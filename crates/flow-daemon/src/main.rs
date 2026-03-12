@@ -11,7 +11,6 @@ use observation::ObservationPipeline;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
-
 #[derive(Debug, Parser)]
 #[command(name = "flow-daemon", version, about = "Daemon for flowd")]
 struct Cli {
