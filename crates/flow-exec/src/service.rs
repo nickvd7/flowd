@@ -5,10 +5,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use flow_core::events::{ActionType, NormalizedEvent};
 use flow_db::repo::{
-    get_automation, get_suggestion, insert_automation, insert_automation_run, list_automation_runs,
-    load_automation_run, load_example_events_for_pattern, set_automation_status,
-    set_suggestion_status, AutomationRunRecord, StoredAutomationRun, AUTOMATION_STATUS_ACTIVE,
-    AUTOMATION_STATUS_DISABLED, AUTOMATION_STATUS_FAILED,
+    get_automation, get_suggestion, increment_accepted, insert_automation, insert_automation_run,
+    list_automation_runs, load_automation_run, load_example_events_for_pattern,
+    set_automation_status, set_suggestion_status, AutomationRunRecord, StoredAutomationRun,
+    AUTOMATION_STATUS_ACTIVE, AUTOMATION_STATUS_DISABLED, AUTOMATION_STATUS_FAILED,
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
 use rusqlite::Connection;
@@ -52,6 +52,7 @@ pub fn approve_suggestion(conn: &mut Connection, suggestion_id: i64) -> Result<i
     let tx = conn
         .transaction()
         .context("failed to start approval transaction")?;
+    increment_accepted(&tx, suggestion_id).context("failed to record suggestion acceptance")?;
     set_suggestion_status(&tx, suggestion_id, "approved")
         .context("failed to update suggestion status")?;
     let automation_id = insert_automation(

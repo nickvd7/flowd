@@ -20,6 +20,14 @@ pub struct StoredSuggestion {
     pub freshness: String,
     pub last_seen_at: String,
     pub created_at: String,
+    pub shown_count: u32,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub snoozed_count: u32,
+    pub last_shown_ts: Option<String>,
+    pub last_accepted_ts: Option<String>,
+    pub last_rejected_ts: Option<String>,
+    pub last_snoozed_ts: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +38,14 @@ pub struct SuggestionDetails {
     pub signature: String,
     pub canonical_summary: String,
     pub proposal_text: String,
+    pub shown_count: u32,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub snoozed_count: u32,
+    pub last_shown_ts: Option<String>,
+    pub last_accepted_ts: Option<String>,
+    pub last_rejected_ts: Option<String>,
+    pub last_snoozed_ts: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -495,7 +511,15 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
             suggestions.usefulness_score,
             suggestions.freshness,
             COALESCE(patterns.last_seen_at, ''),
-            suggestions.created_at
+            suggestions.created_at,
+            suggestions.shown_count,
+            suggestions.accepted_count,
+            suggestions.rejected_count,
+            suggestions.snoozed_count,
+            suggestions.last_shown_ts,
+            suggestions.last_accepted_ts,
+            suggestions.last_rejected_ts,
+            suggestions.last_snoozed_ts
         FROM suggestions
         INNER JOIN patterns ON patterns.id = suggestions.pattern_id
         WHERE suggestions.status = 'pending'
@@ -531,6 +555,14 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
             freshness: row.get(8)?,
             last_seen_at: row.get(9)?,
             created_at: row.get(10)?,
+            shown_count: row.get::<_, i64>(11)? as u32,
+            accepted_count: row.get::<_, i64>(12)? as u32,
+            rejected_count: row.get::<_, i64>(13)? as u32,
+            snoozed_count: row.get::<_, i64>(14)? as u32,
+            last_shown_ts: row.get(15)?,
+            last_accepted_ts: row.get(16)?,
+            last_rejected_ts: row.get(17)?,
+            last_snoozed_ts: row.get(18)?,
         })
     })?;
 
@@ -549,7 +581,15 @@ pub fn get_suggestion(
             suggestions.status,
             patterns.signature,
             COALESCE(patterns.canonical_summary, ''),
-            suggestions.proposal_json
+            suggestions.proposal_json,
+            suggestions.shown_count,
+            suggestions.accepted_count,
+            suggestions.rejected_count,
+            suggestions.snoozed_count,
+            suggestions.last_shown_ts,
+            suggestions.last_accepted_ts,
+            suggestions.last_rejected_ts,
+            suggestions.last_snoozed_ts
         FROM suggestions
         INNER JOIN patterns ON patterns.id = suggestions.pattern_id
         WHERE suggestions.id = ?1
@@ -577,6 +617,14 @@ pub fn get_suggestion(
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            shown_count: row.get::<_, i64>(6)? as u32,
+            accepted_count: row.get::<_, i64>(7)? as u32,
+            rejected_count: row.get::<_, i64>(8)? as u32,
+            snoozed_count: row.get::<_, i64>(9)? as u32,
+            last_shown_ts: row.get(10)?,
+            last_accepted_ts: row.get(11)?,
+            last_rejected_ts: row.get(12)?,
+            last_snoozed_ts: row.get(13)?,
         })
     });
 
@@ -595,6 +643,46 @@ pub fn set_suggestion_status(
     conn.execute(
         "UPDATE suggestions SET status = ?2 WHERE id = ?1",
         params![suggestion_id, status],
+    )
+}
+
+pub fn increment_shown(conn: &Connection, suggestion_id: i64) -> rusqlite::Result<usize> {
+    increment_feedback_counter(
+        conn,
+        suggestion_id,
+        "shown_count",
+        "last_shown_ts",
+        &Utc::now().to_rfc3339(),
+    )
+}
+
+pub fn increment_accepted(conn: &Connection, suggestion_id: i64) -> rusqlite::Result<usize> {
+    increment_feedback_counter(
+        conn,
+        suggestion_id,
+        "accepted_count",
+        "last_accepted_ts",
+        &Utc::now().to_rfc3339(),
+    )
+}
+
+pub fn increment_rejected(conn: &Connection, suggestion_id: i64) -> rusqlite::Result<usize> {
+    increment_feedback_counter(
+        conn,
+        suggestion_id,
+        "rejected_count",
+        "last_rejected_ts",
+        &Utc::now().to_rfc3339(),
+    )
+}
+
+pub fn increment_snoozed(conn: &Connection, suggestion_id: i64) -> rusqlite::Result<usize> {
+    increment_feedback_counter(
+        conn,
+        suggestion_id,
+        "snoozed_count",
+        "last_snoozed_ts",
+        &Utc::now().to_rfc3339(),
     )
 }
 
@@ -872,6 +960,21 @@ fn parse_timestamp(value: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
+fn increment_feedback_counter(
+    conn: &Connection,
+    suggestion_id: i64,
+    counter_column: &str,
+    timestamp_column: &str,
+    timestamp: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        &format!(
+            "UPDATE suggestions SET {counter_column} = {counter_column} + 1, {timestamp_column} = ?2 WHERE id = ?1"
+        ),
+        params![suggestion_id, timestamp],
+    )
+}
+
 fn parse_event_source(value: &str) -> rusqlite::Result<EventSource> {
     match value {
         "FileWatcher" => Ok(EventSource::FileWatcher),
@@ -1143,5 +1246,55 @@ mod tests {
         assert_eq!(pattern_count, 0);
         assert_eq!(suggestion_count, 0);
         assert_eq!(normalized_count, normalized.len() as i64);
+    }
+
+    #[test]
+    fn feedback_history_updates_counts_and_timestamps() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let pattern_id = insert_pattern(
+            &conn,
+            "CreateFile:invoice",
+            2,
+            30_000,
+            "CreateFile -> RenameFile",
+            "2026-03-11T09:00:00Z",
+            1.0,
+            0.8,
+        )
+        .unwrap();
+        let suggestion_id = insert_suggestion(
+            &conn,
+            pattern_id,
+            "Repeated invoice file workflow detected",
+            "2026-03-11T10:00:00Z",
+            0.8,
+        )
+        .unwrap();
+
+        increment_shown(&conn, suggestion_id).unwrap();
+        increment_accepted(&conn, suggestion_id).unwrap();
+        increment_rejected(&conn, suggestion_id).unwrap();
+        increment_snoozed(&conn, suggestion_id).unwrap();
+
+        let stored = get_suggestion(&conn, suggestion_id).unwrap().unwrap();
+        assert_eq!(stored.shown_count, 1);
+        assert_eq!(stored.accepted_count, 1);
+        assert_eq!(stored.rejected_count, 1);
+        assert_eq!(stored.snoozed_count, 1);
+        assert!(stored.last_shown_ts.is_some());
+        assert!(stored.last_accepted_ts.is_some());
+        assert!(stored.last_rejected_ts.is_some());
+        assert!(stored.last_snoozed_ts.is_some());
+
+        let listed = list_suggestions(&conn).unwrap().remove(0);
+        assert_eq!(listed.shown_count, 1);
+        assert_eq!(listed.accepted_count, 1);
+        assert_eq!(listed.rejected_count, 1);
+        assert_eq!(listed.snoozed_count, 1);
+        assert_eq!(listed.last_shown_ts, stored.last_shown_ts);
+        assert_eq!(listed.last_accepted_ts, stored.last_accepted_ts);
+        assert_eq!(listed.last_rejected_ts, stored.last_rejected_ts);
+        assert_eq!(listed.last_snoozed_ts, stored.last_snoozed_ts);
     }
 }

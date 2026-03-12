@@ -73,8 +73,11 @@ fn suggestions_renders_detected_suggestions_table() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let conn = Connection::open(&db_path).unwrap();
-    let rows: Vec<Vec<String>> = list_suggestions(&conn)
-        .unwrap()
+    let suggestions = list_suggestions(&conn).unwrap();
+    assert_eq!(suggestions.len(), 1);
+    assert_eq!(suggestions[0].shown_count, 1);
+    assert!(suggestions[0].last_shown_ts.is_some());
+    let rows: Vec<Vec<String>> = suggestions
         .into_iter()
         .map(|suggestion| {
             vec![
@@ -172,6 +175,77 @@ fn approve_creates_automation_and_lists_it() {
     let automation = list_automations(&conn).unwrap().remove(0);
     assert_eq!(automation.run_count, 0);
     assert_eq!(automation.status, "active");
+    let accepted: (i64, Option<String>) = conn
+        .query_row(
+            "SELECT accepted_count, last_accepted_ts FROM suggestions WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(accepted.0, 1);
+    assert!(accepted.1.is_some());
+}
+
+#[test]
+fn reject_updates_feedback_history_and_hides_suggestion() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let reject = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["reject", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(reject.status.success());
+    assert!(String::from_utf8(reject.stdout)
+        .unwrap()
+        .contains("Rejected suggestion 1."));
+
+    let conn = Connection::open(&db_path).unwrap();
+    let feedback: (String, i64, Option<String>) = conn
+        .query_row(
+            "SELECT status, rejected_count, last_rejected_ts FROM suggestions WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(feedback.0, "rejected");
+    assert_eq!(feedback.1, 1);
+    assert!(feedback.2.is_some());
+    assert!(list_suggestions(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn snooze_updates_feedback_history_and_hides_suggestion() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let snooze = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["snooze", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(snooze.status.success());
+    assert!(String::from_utf8(snooze.stdout)
+        .unwrap()
+        .contains("Snoozed suggestion 1."));
+
+    let conn = Connection::open(&db_path).unwrap();
+    let feedback: (String, i64, Option<String>) = conn
+        .query_row(
+            "SELECT status, snoozed_count, last_snoozed_ts FROM suggestions WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(feedback.0, "snoozed");
+    assert_eq!(feedback.1, 1);
+    assert!(feedback.2.is_some());
+    assert!(list_suggestions(&conn).unwrap().is_empty());
 }
 
 #[test]

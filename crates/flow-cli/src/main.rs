@@ -8,7 +8,8 @@ use flow_core::config::Config;
 use flow_db::{
     open_database,
     repo::{
-        list_automations, list_patterns, list_recent_sessions, list_suggestions, StoredSuggestion,
+        increment_rejected, increment_shown, increment_snoozed, list_automations, list_patterns,
+        list_recent_sessions, list_suggestions, set_suggestion_status, StoredSuggestion,
     },
 };
 use flow_exec::{
@@ -34,6 +35,8 @@ enum Commands {
     Sessions,
     Tail,
     Approve { suggestion_id: i64 },
+    Reject { suggestion_id: i64 },
+    Snooze { suggestion_id: i64 },
     Automations,
     Disable { automation_id: i64 },
     Enable { automation_id: i64 },
@@ -61,6 +64,8 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Sessions) => render_sessions()?,
         Some(Commands::Tail) => println!("tail: not implemented"),
         Some(Commands::Approve { suggestion_id }) => approve_automation_command(suggestion_id)?,
+        Some(Commands::Reject { suggestion_id }) => reject_suggestion_command(suggestion_id)?,
+        Some(Commands::Snooze { suggestion_id }) => snooze_suggestion_command(suggestion_id)?,
         Some(Commands::Automations) => render_automations()?,
         Some(Commands::Disable { automation_id }) => disable_automation_command(automation_id)?,
         Some(Commands::Enable { automation_id }) => enable_automation_command(automation_id)?,
@@ -75,13 +80,15 @@ fn run() -> anyhow::Result<()> {
 }
 
 fn render_suggestions() -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+    let mut conn = open_cli_database()?;
     let suggestions = suggestions_for_display(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
         return Ok(());
     }
+
+    mark_suggestions_displayed(&mut conn, &suggestions)?;
 
     for suggestion in suggestions {
         println!(
@@ -141,13 +148,15 @@ fn render_patterns() -> anyhow::Result<()> {
 }
 
 fn render_suggestions_table() -> anyhow::Result<()> {
-    let conn = open_cli_database()?;
+    let mut conn = open_cli_database()?;
     let suggestions = suggestions_for_display(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
         return Ok(());
     }
+
+    mark_suggestions_displayed(&mut conn, &suggestions)?;
 
     let rows: Vec<Vec<String>> = suggestions
         .into_iter()
@@ -211,6 +220,18 @@ fn approve_automation_command(suggestion_id: i64) -> anyhow::Result<()> {
         approve_suggestion(&mut conn, suggestion_id).context("failed to approve suggestion")?;
 
     println!("Approved suggestion {suggestion_id} as automation {automation_id}.");
+    Ok(())
+}
+
+fn reject_suggestion_command(suggestion_id: i64) -> anyhow::Result<()> {
+    update_suggestion_feedback_status(suggestion_id, "rejected", increment_rejected)?;
+    println!("Rejected suggestion {suggestion_id}.");
+    Ok(())
+}
+
+fn snooze_suggestion_command(suggestion_id: i64) -> anyhow::Result<()> {
+    update_suggestion_feedback_status(suggestion_id, "snoozed", increment_snoozed)?;
+    println!("Snoozed suggestion {suggestion_id}.");
     Ok(())
 }
 
@@ -384,6 +405,50 @@ fn suggestions_for_display(
         .context("failed to evaluate suggestion display through intelligence boundary")
 }
 
+fn mark_suggestions_displayed(
+    conn: &mut rusqlite::Connection,
+    suggestions: &[StoredSuggestion],
+) -> anyhow::Result<()> {
+    let tx = conn
+        .transaction()
+        .context("failed to start suggestion display transaction")?;
+
+    for suggestion in suggestions {
+        increment_shown(&tx, suggestion.suggestion_id).with_context(|| {
+            format!(
+                "failed to record display for suggestion {}",
+                suggestion.suggestion_id
+            )
+        })?;
+    }
+
+    tx.commit()
+        .context("failed to commit suggestion display transaction")?;
+    Ok(())
+}
+
+fn update_suggestion_feedback_status(
+    suggestion_id: i64,
+    status: &str,
+    increment_feedback: fn(&rusqlite::Connection, i64) -> rusqlite::Result<usize>,
+) -> anyhow::Result<()> {
+    let mut conn = open_cli_database()?;
+    let tx = conn
+        .transaction()
+        .context("failed to start suggestion feedback transaction")?;
+    increment_feedback(&tx, suggestion_id).with_context(|| {
+        format!("failed to record {status} feedback for suggestion {suggestion_id}")
+    })?;
+    let updated = set_suggestion_status(&tx, suggestion_id, status)
+        .with_context(|| format!("failed to set suggestion {suggestion_id} status to {status}"))?;
+    if updated == 0 {
+        anyhow::bail!("suggestion {suggestion_id} not found");
+    }
+    tx.commit()
+        .context("failed to commit suggestion feedback transaction")?;
+    Ok(())
+}
+
 fn should_bypass_intelligence_ranking() -> bool {
     std::env::var("FLOWD_BYPASS_INTELLIGENCE_RANKING")
         .ok()
@@ -500,6 +565,14 @@ mod tests {
             freshness: "current".to_string(),
             last_seen_at: "2026-01-15T10:00:00+00:00".to_string(),
             created_at: "2026-01-15T10:00:00+00:00".to_string(),
+            shown_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            snoozed_count: 0,
+            last_shown_ts: None,
+            last_accepted_ts: None,
+            last_rejected_ts: None,
+            last_snoozed_ts: None,
         }
     }
 

@@ -25,6 +25,8 @@ fn suggest_renders_detected_file_workflow() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let conn = Connection::open(&db_path).unwrap();
     let suggestion = list_suggestions(&conn).unwrap().remove(0);
+    assert_eq!(suggestion.shown_count, 1);
+    assert!(suggestion.last_shown_ts.is_some());
     let expected = format!(
         "[{}] {}\n  pattern: {} | runs: {} | avg: {} | score: {:.3} | freshness: {} | last seen: {}\n",
         suggestion.suggestion_id,
