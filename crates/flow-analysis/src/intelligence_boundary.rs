@@ -51,10 +51,14 @@ pub struct InternalSuggestionRecord {
 /// state is deterministic and local even when richer history does not exist.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InternalSuggestionHistory {
-    pub approved_count: u32,
+    pub shown_count: u32,
+    pub accepted_count: u32,
     pub rejected_count: u32,
     pub snoozed_count: u32,
-    pub last_action_at: Option<String>,
+    pub last_shown_ts: Option<String>,
+    pub last_accepted_ts: Option<String>,
+    pub last_rejected_ts: Option<String>,
+    pub last_snoozed_ts: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -207,7 +211,16 @@ pub fn map_stored_suggestions_to_contexts(
                 last_seen_at: suggestion.last_seen_at.clone(),
                 created_at: Some(suggestion.created_at.clone()),
             },
-            history: InternalSuggestionHistory::default(),
+            history: InternalSuggestionHistory {
+                shown_count: suggestion.shown_count,
+                accepted_count: suggestion.accepted_count,
+                rejected_count: suggestion.rejected_count,
+                snoozed_count: suggestion.snoozed_count,
+                last_shown_ts: suggestion.last_shown_ts.clone(),
+                last_accepted_ts: suggestion.last_accepted_ts.clone(),
+                last_rejected_ts: suggestion.last_rejected_ts.clone(),
+                last_snoozed_ts: suggestion.last_snoozed_ts.clone(),
+            },
         })
         .collect()
 }
@@ -391,14 +404,14 @@ mod tests {
             freshness: "current".to_string(),
             last_seen_at: "2026-01-15T10:00:00+00:00".to_string(),
             created_at: created_at.to_string(),
-            shown_count: 0,
-            accepted_count: 0,
-            rejected_count: 0,
-            snoozed_count: 0,
-            last_shown_ts: None,
-            last_accepted_ts: None,
-            last_rejected_ts: None,
-            last_snoozed_ts: None,
+            shown_count: 4,
+            accepted_count: 1,
+            rejected_count: 2,
+            snoozed_count: 3,
+            last_shown_ts: Some("2026-01-16T10:00:00+00:00".to_string()),
+            last_accepted_ts: Some("2026-01-17T10:00:00+00:00".to_string()),
+            last_rejected_ts: Some("2026-01-18T10:00:00+00:00".to_string()),
+            last_snoozed_ts: Some("2026-01-19T10:00:00+00:00".to_string()),
         }
     }
 
@@ -461,7 +474,19 @@ mod tests {
             contexts[0].suggestion.created_at.as_deref(),
             Some("2026-01-15T10:00:00+00:00")
         );
-        assert_eq!(contexts[0].history, InternalSuggestionHistory::default());
+        assert_eq!(
+            contexts[0].history,
+            InternalSuggestionHistory {
+                shown_count: 4,
+                accepted_count: 1,
+                rejected_count: 2,
+                snoozed_count: 3,
+                last_shown_ts: Some("2026-01-16T10:00:00+00:00".to_string()),
+                last_accepted_ts: Some("2026-01-17T10:00:00+00:00".to_string()),
+                last_rejected_ts: Some("2026-01-18T10:00:00+00:00".to_string()),
+                last_snoozed_ts: Some("2026-01-19T10:00:00+00:00".to_string()),
+            }
+        );
     }
 
     #[test]
