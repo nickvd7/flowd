@@ -60,6 +60,35 @@ fn suggest_explain_renders_baseline_fallback_details() {
     assert!(stdout.contains("factors: fallback=No intelligence decision was applied."));
 }
 
+#[test]
+fn suggestions_explain_renders_deterministic_fallback_report_without_marking_display() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["suggestions", "explain", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("suggestion: 1"));
+    assert!(stdout.contains("decision: shown"));
+    assert!(stdout.contains("source: baseline fallback"));
+    assert!(stdout.contains("score_breakdown:"));
+    assert!(stdout.contains("  baseline_score="));
+    assert!(stdout.contains("ranking_factors:"));
+    assert!(stdout.contains("  fallback=No intelligence decision was applied."));
+    assert!(stdout.contains("feedback: shown=0, accepted=0, rejected=0, snoozed=0"));
+
+    let conn = Connection::open(&db_path).unwrap();
+    let suggestion = list_suggestions(&conn).unwrap().remove(0);
+    assert_eq!(suggestion.shown_count, 0);
+    assert!(suggestion.last_shown_ts.is_none());
+}
+
 fn seed_database(db_path: &Path) {
     let mut conn = Connection::open(db_path).unwrap();
     run_migrations(&conn).unwrap();

@@ -105,7 +105,10 @@ impl RecordingFixtureIntelligenceClient {
             };
         }
 
-        let stale_low_value = candidate.recency.seconds_since_last_seen.unwrap_or_default()
+        let stale_low_value = candidate
+            .recency
+            .seconds_since_last_seen
+            .unwrap_or_default()
             > 7 * 24 * 60 * 60
             && baseline_score < 0.75;
         if stale_low_value {
@@ -119,8 +122,10 @@ impl RecordingFixtureIntelligenceClient {
                     summary: Some("Stale low-value work was suppressed.".to_string()),
                     score_breakdown: vec![IntelligenceScoreComponent {
                         label: "staleness_penalty".to_string(),
-                        value: candidate.recency.seconds_since_last_seen.unwrap_or_default()
-                            as f64,
+                        value: candidate
+                            .recency
+                            .seconds_since_last_seen
+                            .unwrap_or_default() as f64,
                     }],
                     timing_reason: None,
                     suppression_reason: Some(
@@ -184,7 +189,9 @@ impl RecordingFixtureIntelligenceClient {
             usefulness_score: Some(baseline_score),
             rank_hint: None,
             explanation: Some(IntelligenceExplanation {
-                summary: Some("Baseline ordering remained appropriate for this workflow.".to_string()),
+                summary: Some(
+                    "Baseline ordering remained appropriate for this workflow.".to_string(),
+                ),
                 score_breakdown: vec![IntelligenceScoreComponent {
                     label: "baseline_score".to_string(),
                     value: baseline_score,
@@ -193,8 +200,7 @@ impl RecordingFixtureIntelligenceClient {
                 suppression_reason: None,
                 ranking_factors: vec![IntelligenceRankingFactor {
                     label: "baseline".to_string(),
-                    detail: "No stronger intelligence signal changed this suggestion."
-                        .to_string(),
+                    detail: "No stronger intelligence signal changed this suggestion.".to_string(),
                 }],
             }),
         }
@@ -509,9 +515,15 @@ fn fixture_generates_realistic_baseline_suggestions_before_intelligence() {
         .collect();
     assert_eq!(signatures.len(), 5);
     assert!(baseline[0].signature.starts_with("CreateFile:invoice"));
-    assert!(signatures.iter().any(|value| value.starts_with("CreateFile:screenshot")));
-    assert!(signatures.iter().any(|value| value.starts_with("CreateFile:receipt")));
-    assert!(signatures.iter().any(|value| value.starts_with("CreateFile:report")));
+    assert!(signatures
+        .iter()
+        .any(|value| value.starts_with("CreateFile:screenshot")));
+    assert!(signatures
+        .iter()
+        .any(|value| value.starts_with("CreateFile:receipt")));
+    assert!(signatures
+        .iter()
+        .any(|value| value.starts_with("CreateFile:report")));
     assert!(signatures
         .iter()
         .any(|value| value == &"CreateFile:scratchpad"));
@@ -567,7 +579,9 @@ fn intelligence_fixture_respects_delayed_and_suppressed_decisions() {
     assert!(!persisted_signatures
         .iter()
         .any(|value| value.starts_with("CreateFile:report")));
-    assert!(!persisted_signatures.iter().any(|value| value == &"CreateFile:scratchpad"));
+    assert!(!persisted_signatures
+        .iter()
+        .any(|value| value == &"CreateFile:scratchpad"));
     assert_eq!(displayed_signatures.len(), 2);
     assert!(!displayed_signatures
         .iter()
@@ -585,16 +599,29 @@ fn intelligence_fixture_passes_feedback_history_through_the_boundary() {
     assert_eq!(refresh_request.context.feedback_summary.accepted_count, 2);
     assert_eq!(refresh_request.context.feedback_summary.rejected_count, 2);
     assert_eq!(refresh_request.context.feedback_summary.snoozed_count, 2);
-    assert_eq!(refresh_request.context.feedback_summary.candidates_with_feedback, 3);
+    assert_eq!(
+        refresh_request
+            .context
+            .feedback_summary
+            .candidates_with_feedback,
+        3
+    );
 
     let screenshot = refresh_request
         .candidates
         .iter()
-        .find(|candidate| candidate.pattern_signature.starts_with("CreateFile:screenshot"))
+        .find(|candidate| {
+            candidate
+                .pattern_signature
+                .starts_with("CreateFile:screenshot")
+        })
         .unwrap();
     assert_eq!(screenshot.history.accepted_count, 2);
     assert_eq!(screenshot.history.shown_count, 3);
-    assert_eq!(screenshot.history.last_accepted_ts.as_deref(), Some(FEEDBACK_TS));
+    assert_eq!(
+        screenshot.history.last_accepted_ts.as_deref(),
+        Some(FEEDBACK_TS)
+    );
 
     let report = refresh_request
         .candidates
@@ -602,15 +629,25 @@ fn intelligence_fixture_passes_feedback_history_through_the_boundary() {
         .find(|candidate| candidate.pattern_signature.starts_with("CreateFile:report"))
         .unwrap();
     assert_eq!(report.history.rejected_count, 2);
-    assert_eq!(report.history.last_rejected_ts.as_deref(), Some(FEEDBACK_TS));
+    assert_eq!(
+        report.history.last_rejected_ts.as_deref(),
+        Some(FEEDBACK_TS)
+    );
 
     let receipt = refresh_request
         .candidates
         .iter()
-        .find(|candidate| candidate.pattern_signature.starts_with("CreateFile:receipt"))
+        .find(|candidate| {
+            candidate
+                .pattern_signature
+                .starts_with("CreateFile:receipt")
+        })
         .unwrap();
     assert_eq!(receipt.history.snoozed_count, 2);
-    assert_eq!(receipt.history.last_snoozed_ts.as_deref(), Some(FEEDBACK_TS));
+    assert_eq!(
+        receipt.history.last_snoozed_ts.as_deref(),
+        Some(FEEDBACK_TS)
+    );
 }
 
 #[test]
@@ -620,10 +657,21 @@ fn explainability_survives_the_integrated_intelligence_path() {
     let screenshot = snapshot
         .explainability
         .iter()
-        .find(|result| result.suggestion.signature.starts_with("CreateFile:screenshot"))
+        .find(|result| {
+            result
+                .suggestion
+                .signature
+                .starts_with("CreateFile:screenshot")
+        })
         .unwrap();
-    assert_eq!(screenshot.explainability.source, ExplainabilitySource::Intelligence);
-    assert_eq!(screenshot.explainability.action, SuggestionDecisionAction::Keep);
+    assert_eq!(
+        screenshot.explainability.source,
+        ExplainabilitySource::Intelligence
+    );
+    assert_eq!(
+        screenshot.explainability.action,
+        SuggestionDecisionAction::Keep
+    );
     assert_eq!(screenshot.explainability.rank_hint, Some(0));
     assert!(screenshot
         .explainability
@@ -638,9 +686,17 @@ fn explainability_survives_the_integrated_intelligence_path() {
     let receipt = snapshot
         .explainability
         .iter()
-        .find(|result| result.suggestion.signature.starts_with("CreateFile:receipt"))
+        .find(|result| {
+            result
+                .suggestion
+                .signature
+                .starts_with("CreateFile:receipt")
+        })
         .unwrap();
-    assert_eq!(receipt.explainability.action, SuggestionDecisionAction::Delay);
+    assert_eq!(
+        receipt.explainability.action,
+        SuggestionDecisionAction::Delay
+    );
     assert_eq!(
         receipt.explainability.timing_reason.as_deref(),
         Some("The user snoozed similar suggestions and asked to revisit later.")
@@ -656,11 +712,10 @@ fn open_core_fallback_still_works_without_intelligence() {
         &flow_analysis::intelligence_boundary::NoopIntelligenceClient,
     )
     .unwrap();
-    let explainability = IntelligenceBoundary::new(
-        &flow_analysis::intelligence_boundary::NoopIntelligenceClient,
-    )
-    .evaluate_stored_suggestions_for_display(&baseline)
-    .unwrap();
+    let explainability =
+        IntelligenceBoundary::new(&flow_analysis::intelligence_boundary::NoopIntelligenceClient)
+            .evaluate_stored_suggestions_for_display(&baseline)
+            .unwrap();
 
     assert_eq!(displayed, baseline);
     assert!(explainability
