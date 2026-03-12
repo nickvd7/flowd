@@ -115,10 +115,30 @@ flowd is built as a **local-first workflow discovery pipeline**.
 
 It observes activity on your machine, converts events into structured data, detects repeated workflows, and proposes safe automations.
 
-System flow:
+Simplified architecture diagram:
 
 ```
-Local events
+User activity
+    ↓
+Adapters
+    ↓
+SQLite storage
+    ↓
+Pattern detection
+    ↓
+Suggestion generation
+    ↓
+Intelligence decision layer
+    ↓
+CLI suggestions
+    ↓
+Automation execution
+```
+
+Operational flow inside `flowd`:
+
+```
+User activity
     ↓
 Adapters
     ↓
@@ -128,14 +148,20 @@ Normalization
     ↓
 SQLite storage
     ↓
-Session builder
+Sessions
     ↓
 Pattern detection
     ↓
-Suggestions
+Baseline suggestions
+    ↓
+Optional intelligence evaluation
     ↓
 CLI inspection + automation approval
+    ↓
+Execution + undo
 ```
+
+`flowd` owns event capture, persistence, sessions, patterns, baseline suggestions, approval, execution, and undo. `flowd-intelligence`, when present, only influences ranking, timing, suppression, personalization, clustering, proposal wording, and display orchestration. The dependency direction is one-way: `flowd -> flowd-intelligence`.
 
 The system is intentionally modular:
 
