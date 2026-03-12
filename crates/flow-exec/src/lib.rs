@@ -7,5 +7,6 @@ pub use engine::{
 };
 pub use service::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
-    execute_automation, list_runs, undo_automation_run, DryRunOutcome, UndoOutcome,
+    execute_automation, list_runs, preview_automation, preview_suggestion, undo_automation_run,
+    AutomationPreview, DryRunOutcome, PreviewExample, PreviewRisk, UndoOutcome,
 };

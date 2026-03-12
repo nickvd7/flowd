@@ -82,6 +82,10 @@ fn suggestions_explain_renders_deterministic_fallback_report_without_marking_dis
     assert!(stdout.contains("ranking_factors:"));
     assert!(stdout.contains("  fallback=No intelligence decision was applied."));
     assert!(stdout.contains("feedback: shown=0, accepted=0, rejected=0, snoozed=0"));
+    assert!(stdout.contains("Automation preview"));
+    assert!(stdout.contains("Examples:"));
+    assert!(stdout.contains("invoice-1001.pdf -> invoice-1001-reviewed.pdf"));
+    assert!(stdout.contains("Risk:"));
 
     let conn = Connection::open(&db_path).unwrap();
     let suggestion = list_suggestions(&conn).unwrap().remove(0);
