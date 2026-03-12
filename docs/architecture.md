@@ -2,6 +2,8 @@
 
 flowd follows a **terminal-first, local-first architecture** where workflow discovery and automation logic run locally.
 
+For the canonical high-level system description, repository ownership split, and integration flow, start with [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md).
+
 ## Pipeline layers
 
 1. **Observation layer** captures local events through adapters, stores raw events, and triggers downstream analysis work.
@@ -58,7 +60,9 @@ Private intelligence is optional and should only influence:
 - timing
 - suppression
 - personalization
-- presentation quality
+- clustering
+- proposal wording
+- display orchestration
 
 Open-core should never become dependent on private intelligence for basic workflow functionality. `flowd` must remain able to observe, detect, suggest, approve, execute, and undo without any private dependency.
 
@@ -74,6 +78,12 @@ The integration direction is one-way:
 Architecture note: Open-core owns facts and actions; private-core improves which suggestions are shown, when they are shown, and how they are presented.
 
 ## Related documentation
+
+The canonical high-level overview is:
+
+```text
+docs/system-overview.md
+```
 
 A more detailed system diagram is available in:
 
