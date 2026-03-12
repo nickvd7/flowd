@@ -30,6 +30,19 @@ pub struct StoredSuggestion {
     pub last_snoozed_ts: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSuggestionHistory {
+    pub signature: String,
+    pub shown_count: u32,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub snoozed_count: u32,
+    pub last_shown_ts: Option<String>,
+    pub last_accepted_ts: Option<String>,
+    pub last_rejected_ts: Option<String>,
+    pub last_snoozed_ts: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SuggestionDetails {
     pub suggestion_id: i64,
@@ -569,6 +582,69 @@ pub fn list_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggest
     rows.collect()
 }
 
+pub fn list_suggestion_histories(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<StoredSuggestionHistory>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            patterns.signature,
+            suggestions.shown_count,
+            suggestions.accepted_count,
+            suggestions.rejected_count,
+            suggestions.snoozed_count,
+            suggestions.last_shown_ts,
+            suggestions.last_accepted_ts,
+            suggestions.last_rejected_ts,
+            suggestions.last_snoozed_ts
+        FROM suggestions
+        INNER JOIN patterns ON patterns.id = suggestions.pattern_id
+        ORDER BY patterns.signature ASC, suggestions.id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        Ok(StoredSuggestionHistory {
+            signature: row.get(0)?,
+            shown_count: row.get::<_, i64>(1)? as u32,
+            accepted_count: row.get::<_, i64>(2)? as u32,
+            rejected_count: row.get::<_, i64>(3)? as u32,
+            snoozed_count: row.get::<_, i64>(4)? as u32,
+            last_shown_ts: row.get(5)?,
+            last_accepted_ts: row.get(6)?,
+            last_rejected_ts: row.get(7)?,
+            last_snoozed_ts: row.get(8)?,
+        })
+    })?;
+
+    let mut aggregated: Vec<StoredSuggestionHistory> = Vec::new();
+
+    for history in rows {
+        let history = history?;
+        if let Some(current) = aggregated.last_mut() {
+            if current.signature == history.signature {
+                current.shown_count += history.shown_count;
+                current.accepted_count += history.accepted_count;
+                current.rejected_count += history.rejected_count;
+                current.snoozed_count += history.snoozed_count;
+                current.last_shown_ts =
+                    latest_timestamp(current.last_shown_ts.take(), history.last_shown_ts);
+                current.last_accepted_ts =
+                    latest_timestamp(current.last_accepted_ts.take(), history.last_accepted_ts);
+                current.last_rejected_ts =
+                    latest_timestamp(current.last_rejected_ts.take(), history.last_rejected_ts);
+                current.last_snoozed_ts =
+                    latest_timestamp(current.last_snoozed_ts.take(), history.last_snoozed_ts);
+                continue;
+            }
+        }
+
+        aggregated.push(history);
+    }
+
+    Ok(aggregated)
+}
+
 pub fn get_suggestion(
     conn: &Connection,
     suggestion_id: i64,
@@ -960,6 +1036,15 @@ fn parse_timestamp(value: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
+fn latest_timestamp(current: Option<String>, next: Option<String>) -> Option<String> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(if next > current { next } else { current }),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    }
+}
+
 fn increment_feedback_counter(
     conn: &Connection,
     suggestion_id: i64,
@@ -1296,5 +1381,87 @@ mod tests {
         assert_eq!(listed.last_accepted_ts, stored.last_accepted_ts);
         assert_eq!(listed.last_rejected_ts, stored.last_rejected_ts);
         assert_eq!(listed.last_snoozed_ts, stored.last_snoozed_ts);
+    }
+
+    #[test]
+    fn list_suggestion_histories_aggregates_feedback_by_signature() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let pattern_id = insert_pattern(
+            &conn,
+            "CreateFile:invoice",
+            2,
+            30_000,
+            "CreateFile -> RenameFile",
+            "2026-03-11T09:00:00Z",
+            1.0,
+            0.8,
+        )
+        .unwrap();
+        let first_id = insert_suggestion(
+            &conn,
+            pattern_id,
+            "Repeated invoice file workflow detected",
+            "2026-03-11T10:00:00Z",
+            0.8,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE suggestions SET freshness = 'stale' WHERE id = ?1",
+            [first_id],
+        )
+        .unwrap();
+        let second_id = insert_suggestion(
+            &conn,
+            pattern_id,
+            "Repeated invoice file workflow detected again",
+            "2026-03-11T11:00:00Z",
+            0.7,
+        )
+        .unwrap();
+
+        conn.execute(
+            "UPDATE suggestions
+             SET shown_count = 2,
+                 accepted_count = 1,
+                 rejected_count = 0,
+                 snoozed_count = 1,
+                 last_shown_ts = '2026-03-11T10:10:00+00:00',
+                 last_accepted_ts = '2026-03-11T10:20:00+00:00',
+                 last_snoozed_ts = '2026-03-11T10:30:00+00:00'
+             WHERE id = ?1",
+            [first_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE suggestions
+             SET shown_count = 3,
+                 accepted_count = 0,
+                 rejected_count = 4,
+                 snoozed_count = 2,
+                 last_shown_ts = '2026-03-11T11:10:00+00:00',
+                 last_rejected_ts = '2026-03-11T11:20:00+00:00',
+                 last_snoozed_ts = '2026-03-11T11:30:00+00:00'
+             WHERE id = ?1",
+            [second_id],
+        )
+        .unwrap();
+
+        let histories = list_suggestion_histories(&conn).unwrap();
+
+        assert_eq!(
+            histories,
+            vec![StoredSuggestionHistory {
+                signature: "CreateFile:invoice".to_string(),
+                shown_count: 5,
+                accepted_count: 1,
+                rejected_count: 4,
+                snoozed_count: 3,
+                last_shown_ts: Some("2026-03-11T11:10:00+00:00".to_string()),
+                last_accepted_ts: Some("2026-03-11T10:20:00+00:00".to_string()),
+                last_rejected_ts: Some("2026-03-11T11:20:00+00:00".to_string()),
+                last_snoozed_ts: Some("2026-03-11T11:30:00+00:00".to_string()),
+            }]
+        );
     }
 }
