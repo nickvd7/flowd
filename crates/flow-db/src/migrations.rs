@@ -52,7 +52,15 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
             proposal_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             usefulness_score REAL NOT NULL DEFAULT 0.0,
-            freshness TEXT NOT NULL DEFAULT 'current'
+            freshness TEXT NOT NULL DEFAULT 'current',
+            shown_count INTEGER NOT NULL DEFAULT 0,
+            accepted_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0,
+            snoozed_count INTEGER NOT NULL DEFAULT 0,
+            last_shown_ts TEXT,
+            last_accepted_ts TEXT,
+            last_rejected_ts TEXT,
+            last_snoozed_ts TEXT
         );
 
         CREATE TABLE IF NOT EXISTS automations (
@@ -84,6 +92,14 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     ensure_patterns_is_active_column(conn)?;
     ensure_suggestions_usefulness_score_column(conn)?;
     ensure_suggestions_freshness_column(conn)?;
+    ensure_suggestions_shown_count_column(conn)?;
+    ensure_suggestions_accepted_count_column(conn)?;
+    ensure_suggestions_rejected_count_column(conn)?;
+    ensure_suggestions_snoozed_count_column(conn)?;
+    ensure_suggestions_last_shown_ts_column(conn)?;
+    ensure_suggestions_last_accepted_ts_column(conn)?;
+    ensure_suggestions_last_rejected_ts_column(conn)?;
+    ensure_suggestions_last_snoozed_ts_column(conn)?;
     normalize_automation_states(conn)?;
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_patterns_signature ON patterns(signature)",
@@ -182,6 +198,78 @@ fn ensure_suggestions_freshness_column(conn: &Connection) -> rusqlite::Result<()
     )
 }
 
+fn ensure_suggestions_shown_count_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "shown_count",
+        "ALTER TABLE suggestions ADD COLUMN shown_count INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn ensure_suggestions_accepted_count_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "accepted_count",
+        "ALTER TABLE suggestions ADD COLUMN accepted_count INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn ensure_suggestions_rejected_count_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "rejected_count",
+        "ALTER TABLE suggestions ADD COLUMN rejected_count INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn ensure_suggestions_snoozed_count_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "snoozed_count",
+        "ALTER TABLE suggestions ADD COLUMN snoozed_count INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn ensure_suggestions_last_shown_ts_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "last_shown_ts",
+        "ALTER TABLE suggestions ADD COLUMN last_shown_ts TEXT",
+    )
+}
+
+fn ensure_suggestions_last_accepted_ts_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "last_accepted_ts",
+        "ALTER TABLE suggestions ADD COLUMN last_accepted_ts TEXT",
+    )
+}
+
+fn ensure_suggestions_last_rejected_ts_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "last_rejected_ts",
+        "ALTER TABLE suggestions ADD COLUMN last_rejected_ts TEXT",
+    )
+}
+
+fn ensure_suggestions_last_snoozed_ts_column(conn: &Connection) -> rusqlite::Result<()> {
+    ensure_column_exists(
+        conn,
+        "suggestions",
+        "last_snoozed_ts",
+        "ALTER TABLE suggestions ADD COLUMN last_snoozed_ts TEXT",
+    )
+}
+
 fn normalize_automation_states(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE automations SET state = 'active' WHERE state IS NULL OR TRIM(state) = '' OR state = 'approved'",
@@ -217,5 +305,56 @@ mod tests {
     fn migrations_run() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
+    }
+
+    #[test]
+    fn migrations_add_feedback_history_columns_to_existing_suggestions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE suggestions (
+                id INTEGER PRIMARY KEY,
+                pattern_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                proposal_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                usefulness_score REAL NOT NULL DEFAULT 0.0,
+                freshness TEXT NOT NULL DEFAULT 'current'
+            );
+            INSERT INTO suggestions (id, pattern_id, status, proposal_json, created_at, usefulness_score, freshness)
+            VALUES (1, 7, 'pending', '{"kind":"file_workflow","message":"test"}', '2026-03-11T10:00:00Z', 0.8, 'current');
+            "#,
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let feedback: (i64, i64, i64, i64, Option<String>, Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT shown_count, accepted_count, rejected_count, snoozed_count, last_shown_ts, last_accepted_ts, last_rejected_ts, last_snoozed_ts FROM suggestions WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(feedback.0, 0);
+        assert_eq!(feedback.1, 0);
+        assert_eq!(feedback.2, 0);
+        assert_eq!(feedback.3, 0);
+        assert_eq!(feedback.4, None);
+        assert_eq!(feedback.5, None);
+        assert_eq!(feedback.6, None);
+        assert_eq!(feedback.7, None);
     }
 }

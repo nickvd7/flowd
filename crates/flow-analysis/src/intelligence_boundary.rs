@@ -232,7 +232,9 @@ pub fn apply_intelligence_response(
 
             SuggestionPresentation {
                 pattern_signature: suggestion.pattern_signature.clone(),
-                action: decision.map(|value| value.action).unwrap_or(SuggestionDecisionAction::Keep),
+                action: decision
+                    .map(|value| value.action)
+                    .unwrap_or(SuggestionDecisionAction::Keep),
                 proposal_text: decision
                     .and_then(|value| value.proposal_text.clone())
                     .unwrap_or_else(|| suggestion.baseline_proposal_text.clone()),
@@ -271,7 +273,11 @@ pub fn apply_intelligence_display(
                 suggestion.usefulness_score = usefulness_score;
             }
 
-            (rank_hint, index, SuggestionDisplayResult { suggestion, action })
+            (
+                rank_hint,
+                index,
+                SuggestionDisplayResult { suggestion, action },
+            )
         })
         .collect();
 
@@ -385,6 +391,14 @@ mod tests {
             freshness: "current".to_string(),
             last_seen_at: "2026-01-15T10:00:00+00:00".to_string(),
             created_at: created_at.to_string(),
+            shown_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            snoozed_count: 0,
+            last_shown_ts: None,
+            last_accepted_ts: None,
+            last_rejected_ts: None,
+            last_snoozed_ts: None,
         }
     }
 
