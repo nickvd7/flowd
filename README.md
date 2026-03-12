@@ -111,59 +111,24 @@ Everything is stored locally in **SQLite**.
 
 ## Architecture overview
 
-flowd is built as a **local-first workflow discovery pipeline**.
+flowd is built as a local-first workflow discovery pipeline. It observes activity on your machine, stores workflow facts in SQLite, detects repeated patterns, generates baseline suggestions, and turns approved suggestions into automations.
 
-It observes activity on your machine, converts events into structured data, detects repeated workflows, and proposes safe automations.
-
-Simplified architecture diagram:
-
-```
-User activity
-    ↓
-Adapters
-    ↓
-SQLite storage
-    ↓
-Pattern detection
-    ↓
-Suggestion generation
-    ↓
-Intelligence decision layer
-    ↓
-CLI suggestions
-    ↓
-Automation execution
+```mermaid
+flowchart TD
+    A[User activity] --> B[flowd adapters]
+    B --> C[SQLite facts and feedback history]
+    C --> D[Sessions and patterns]
+    D --> E[Baseline suggestions]
+    E --> F{Optional intelligence}
+    F -->|No| G[CLI suggestions with baseline explainability]
+    F -->|flowd -> flowd-intelligence| H[Display decisions and explanation metadata]
+    H --> G
+    G --> I[Approval, execution, and undo]
 ```
 
-Operational flow inside `flowd`:
+`flowd` owns facts and actions: event capture, persistence, sessions, patterns, baseline suggestions, automations, execution, undo, feedback history, and explainability normalization. `flowd-intelligence`, when present, only owns prioritization, timing, suppression, personalization, clustering, wording, and display decisions. The dependency direction is one-way: `flowd -> flowd-intelligence`.
 
-```
-User activity
-    ↓
-Adapters
-    ↓
-Raw events
-    ↓
-Normalization
-    ↓
-SQLite storage
-    ↓
-Sessions
-    ↓
-Pattern detection
-    ↓
-Baseline suggestions
-    ↓
-Optional intelligence evaluation
-    ↓
-CLI inspection + automation approval
-    ↓
-Execution + undo
-```
-
-`flowd` owns event capture, persistence, sessions, patterns, baseline suggestions, approval, execution, and undo. `flowd-intelligence`, when present, only influences ranking, timing, suppression, personalization, clustering, proposal wording, and display orchestration. The dependency direction is one-way: `flowd -> flowd-intelligence`.
-
-Explainability follows the same rule. When optional intelligence changes ordering, timing, suppression, wording, or display behavior, `flowd` can surface a compact explanation for that decision through the same boundary. If no intelligence is configured, `flowd` stays deterministic and reports an explicit baseline fallback explanation instead of inventing hidden reasoning.
+Open-core remains functional without private intelligence. For the canonical architecture overview, repository ownership split, hard boundary, and practical integration flow, see [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md).
 
 The system is intentionally modular:
 
@@ -177,17 +142,7 @@ The system is intentionally modular:
 - **flow-dsl** — automation specification
 - **flow-exec** — dry-run and execution engine
 
-For the full architecture description see:
-
-```
-docs/architecture.md
-```
-
-Start with the canonical system overview if you are new to the repo:
-
-```
-docs/system-overview.md
-```
+For lower-level architecture detail see [docs/architecture.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture.md). Start with [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md) if you are new to the repo.
 
 ---
 

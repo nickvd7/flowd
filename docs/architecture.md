@@ -7,7 +7,7 @@ For the canonical high-level system description, repository ownership split, and
 ## Pipeline layers
 
 1. **Observation layer** captures local events through adapters, stores raw events, and triggers downstream analysis work.
-2. **Analysis layer** normalizes raw events, builds sessions, detects repeated patterns, generates baseline suggestions, and optionally evaluates the private intelligence boundary.
+2. **Analysis layer** normalizes raw events, builds sessions, detects repeated patterns, generates baseline suggestions, records feedback-history signals, and optionally evaluates the private intelligence boundary.
 3. **Execution layer** approves suggestions into automations, plans dry-runs, executes supported actions, and stores automation run results.
 
 ## Core responsibilities
@@ -15,7 +15,7 @@ For the canonical high-level system description, repository ownership split, and
 1. **Adapters** capture raw local events such as filesystem, terminal, clipboard, browser, or window events.
 2. **Core** defines stable shared domain types and configuration.
 3. **DB** persists raw events, normalized events, sessions, patterns, suggestions, suggestion feedback history, automations, and execution runs.
-4. **Analysis** owns normalization orchestration, session rebuilding, baseline suggestion generation, and the optional intelligence boundary.
+4. **Analysis** owns normalization orchestration, session rebuilding, baseline suggestion generation, explainability normalization, and the optional intelligence boundary.
 5. **Patterns** owns normalization rules, session building, and repeated workflow detection.
 6. **DSL** defines safe automation specifications.
 7. **Exec** owns suggestion approval, dry-run planning, execution planning, and execution.
@@ -27,7 +27,7 @@ For the canonical high-level system description, repository ownership split, and
 ```text
 Observation: user activity -> adapters -> raw events -> raw event persistence
     ↓
-Analysis: normalization -> normalized event persistence -> sessions -> pattern detection -> baseline suggestions -> optional intelligence evaluation -> CLI suggestions
+Analysis: normalization -> normalized event persistence -> sessions -> pattern detection -> baseline suggestions -> optional intelligence evaluation -> local explainability normalization -> CLI suggestions
     ↓
 Execution: CLI inspection -> suggestion approval -> dry-run planning -> execution -> automation_runs
 ```
@@ -43,6 +43,7 @@ Execution: CLI inspection -> suggestion approval -> dry-run planning -> executio
 - pattern detection
 - baseline suggestion generation
 - suggestion persistence and user action history persistence
+- feedback history
 - CLI inspection tools
 - automation DSL
 - automations
@@ -56,13 +57,13 @@ Execution: CLI inspection -> suggestion approval -> dry-run planning -> executio
 
 Private intelligence is optional and should only influence:
 
-- ranking
+- prioritization
 - timing
 - suppression
 - personalization
 - clustering
-- proposal wording
-- display orchestration
+- wording
+- display decisions
 
 Open-core should never become dependent on private intelligence for basic workflow functionality. `flowd` must remain able to observe, detect, suggest, approve, execute, and undo without any private dependency.
 
@@ -75,7 +76,7 @@ The integration direction is one-way:
 
 `flowd` never exposes internal storage rows or execution details directly to private intelligence. It maps internal analysis state to narrow contract/value objects, evaluates an optional client, and maps the resulting display decisions back into open-core suggestion behavior in one explicit analysis boundary module.
 
-Architecture note: Open-core owns facts and actions; private-core improves which suggestions are shown, when they are shown, and how they are presented.
+Architecture note: `flowd` owns facts and actions; `flowd-intelligence` improves display decisions over those facts.
 
 ## Feedback history contract
 
@@ -92,7 +93,9 @@ The current feedback-history fields are:
 - `last_rejected_ts`
 - `last_snoozed_ts`
 
-These fields are persisted by `flow-db`, exposed through repository-layer suggestion models, and mapped into the intelligence boundary DTO so private ranking or suppression logic can consume them later without owning storage.
+These fields are persisted by `flow-db`, exposed through repository-layer suggestion models, and mapped into the intelligence boundary DTO so private prioritization, suppression, or personalization logic can consume them later without owning storage.
+
+Explainability follows the same ownership rule. Private intelligence may return structured reasons, but `flowd` normalizes the final local explainability record and falls back explicitly when no private explanation exists.
 
 ## Related documentation
 
