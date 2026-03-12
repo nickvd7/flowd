@@ -31,9 +31,10 @@ Expanded end-to-end flow:
 5. `flowd` detects repeated patterns across sessions.
 6. `flowd` generates baseline suggestions from those patterns.
 7. `flowd` may optionally send narrow suggestion DTOs through the intelligence boundary for private evaluation.
-8. `flowd` displays the final suggestion list in the CLI.
-9. The user may approve a suggestion and execute the resulting automation.
-10. `flowd` records execution results and undo data in the open core.
+8. `flowd` maps any returned ranking, timing, suppression, wording, and explainability metadata back into local deterministic display records.
+9. `flowd` displays the final suggestion list in the CLI.
+10. The user may approve a suggestion and execute the resulting automation.
+11. `flowd` records execution results and undo data in the open core.
 
 This is the core architectural rule for the ecosystem: open core creates facts and performs actions; private intelligence may improve the decision layer over those facts.
 
@@ -88,6 +89,7 @@ Boundary rules:
 - `flowd` exports narrow DTOs rather than internal database rows or executor internals.
 - `flowd` calls the private layer from one explicit boundary module: [crates/flow-analysis/src/intelligence_boundary.rs](/Users/nickvandort/Documents/Coding/flowd/crates/flow-analysis/src/intelligence_boundary.rs).
 - `flowd-intelligence` returns display decisions, not persistence commands or execution commands.
+- Explainability is optional and deterministic: the private layer may return structured reasons, but `flowd` always normalizes them locally and falls back explicitly when no explanation is available.
 - If the private layer is absent or fails, `flowd` falls back to the baseline open-core flow.
 
 The hard boundary is what keeps the public engine viable as a standalone product and prevents private code from absorbing core system responsibilities.

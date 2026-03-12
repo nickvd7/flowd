@@ -2,7 +2,8 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use flow_analysis::intelligence_boundary::{
-    display_stored_suggestions, IntelligenceClient, NoopIntelligenceClient,
+    ExplainabilitySource, IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient,
+    SuggestionDecisionAction, SuggestionDisplayResult, SuggestionExplainability,
 };
 use flow_core::config::Config;
 use flow_db::{
@@ -30,20 +31,42 @@ struct Cli {
 enum Commands {
     Status,
     Patterns,
-    Suggest,
-    Suggestions,
+    Suggest {
+        #[arg(long)]
+        explain: bool,
+    },
+    Suggestions {
+        #[arg(long)]
+        explain: bool,
+    },
     Sessions,
     Tail,
-    Approve { suggestion_id: i64 },
-    Reject { suggestion_id: i64 },
-    Snooze { suggestion_id: i64 },
+    Approve {
+        suggestion_id: i64,
+    },
+    Reject {
+        suggestion_id: i64,
+    },
+    Snooze {
+        suggestion_id: i64,
+    },
     Automations,
-    Disable { automation_id: i64 },
-    Enable { automation_id: i64 },
-    Run { automation_id: i64 },
-    DryRun { automation_id: i64 },
+    Disable {
+        automation_id: i64,
+    },
+    Enable {
+        automation_id: i64,
+    },
+    Run {
+        automation_id: i64,
+    },
+    DryRun {
+        automation_id: i64,
+    },
     Runs,
-    Undo { run_id: i64 },
+    Undo {
+        run_id: i64,
+    },
 }
 
 fn main() {
@@ -59,8 +82,8 @@ fn run() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Status) => println!("flowd status: template skeleton"),
         Some(Commands::Patterns) => render_patterns()?,
-        Some(Commands::Suggest) => render_suggestions()?,
-        Some(Commands::Suggestions) => render_suggestions_table()?,
+        Some(Commands::Suggest { explain }) => render_suggestions(explain)?,
+        Some(Commands::Suggestions { explain }) => render_suggestions_table(explain)?,
         Some(Commands::Sessions) => render_sessions()?,
         Some(Commands::Tail) => println!("tail: not implemented"),
         Some(Commands::Approve { suggestion_id }) => approve_automation_command(suggestion_id)?,
@@ -79,31 +102,36 @@ fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_suggestions() -> anyhow::Result<()> {
+fn render_suggestions(explain: bool) -> anyhow::Result<()> {
     let mut conn = open_cli_database()?;
-    let suggestions = suggestions_for_display(&conn, &NoopIntelligenceClient)?;
+    let suggestions = suggestion_display_results(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
         return Ok(());
     }
 
-    mark_suggestions_displayed(&mut conn, &suggestions)?;
+    mark_suggestions_displayed_from_results(&mut conn, &suggestions)?;
 
     for suggestion in suggestions {
         println!(
             "[{}] {}",
-            suggestion.suggestion_id, suggestion.proposal_text
+            suggestion.suggestion.suggestion_id, suggestion.suggestion.proposal_text
         );
         println!(
             "  pattern: {} | runs: {} | avg: {} | score: {:.3} | freshness: {} | last seen: {}",
-            suggestion.canonical_summary,
-            suggestion.count,
-            format_duration(suggestion.avg_duration_ms),
-            suggestion.usefulness_score,
-            suggestion.freshness,
-            format_timestamp(&suggestion.last_seen_at)
+            suggestion.suggestion.canonical_summary,
+            suggestion.suggestion.count,
+            format_duration(suggestion.suggestion.avg_duration_ms),
+            suggestion.suggestion.usefulness_score,
+            suggestion.suggestion.freshness,
+            format_timestamp(&suggestion.suggestion.last_seen_at)
         );
+        if explain {
+            for line in render_explainability_lines(&suggestion.explainability) {
+                println!("  {line}");
+            }
+        }
     }
 
     Ok(())
@@ -147,44 +175,19 @@ fn render_patterns() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn render_suggestions_table() -> anyhow::Result<()> {
+fn render_suggestions_table(explain: bool) -> anyhow::Result<()> {
     let mut conn = open_cli_database()?;
-    let suggestions = suggestions_for_display(&conn, &NoopIntelligenceClient)?;
+    let suggestions = suggestion_display_results(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
         return Ok(());
     }
 
-    mark_suggestions_displayed(&mut conn, &suggestions)?;
-
-    let rows: Vec<Vec<String>> = suggestions
-        .into_iter()
-        .map(|suggestion| {
-            vec![
-                suggestion.suggestion_id.to_string(),
-                format!("{:.3}", suggestion.usefulness_score),
-                render_pattern_name(&suggestion.signature),
-                suggestion.count.to_string(),
-                format_duration(suggestion.avg_duration_ms),
-                suggestion.freshness,
-                format_timestamp(&suggestion.last_seen_at),
-                suggestion.proposal_text,
-            ]
-        })
-        .collect();
+    mark_suggestions_displayed_from_results(&mut conn, &suggestions)?;
     print_table(
-        &[
-            "id",
-            "score",
-            "pattern",
-            "runs",
-            "avg",
-            "freshness",
-            "last_seen",
-            "description",
-        ],
-        &rows,
+        &suggestion_table_headers(explain),
+        &suggestion_display_rows(suggestions, explain),
     );
     Ok(())
 }
@@ -391,18 +394,177 @@ fn open_cli_database() -> anyhow::Result<rusqlite::Connection> {
     open_database(&db_path).with_context(|| format!("failed to open database at {db_path}"))
 }
 
-fn suggestions_for_display(
+fn suggestion_display_results(
     conn: &rusqlite::Connection,
     intelligence_client: &dyn IntelligenceClient,
-) -> anyhow::Result<Vec<StoredSuggestion>> {
+) -> anyhow::Result<Vec<SuggestionDisplayResult>> {
     let suggestions = list_suggestions(conn).context("failed to read suggestions")?;
 
     if should_bypass_intelligence_ranking() {
-        return Ok(suggestions);
+        return Ok(suggestions
+            .into_iter()
+            .map(|suggestion| SuggestionDisplayResult {
+                explainability: baseline_fallback_explainability(suggestion.usefulness_score),
+                suggestion,
+                action: SuggestionDecisionAction::Keep,
+            })
+            .collect());
     }
 
-    display_stored_suggestions(&suggestions, intelligence_client)
-        .context("failed to evaluate suggestion display through intelligence boundary")
+    Ok(IntelligenceBoundary::new(intelligence_client)
+        .evaluate_stored_suggestions_for_display(&suggestions)?
+        .into_iter()
+        .filter(|result| result.action == SuggestionDecisionAction::Keep)
+        .collect())
+}
+
+fn mark_suggestions_displayed_from_results(
+    conn: &mut rusqlite::Connection,
+    suggestions: &[SuggestionDisplayResult],
+) -> anyhow::Result<()> {
+    let plain: Vec<_> = suggestions
+        .iter()
+        .map(|result| result.suggestion.clone())
+        .collect();
+    mark_suggestions_displayed(conn, &plain)
+}
+
+fn render_explainability_summary(explainability: &SuggestionExplainability) -> String {
+    let rank = explainability
+        .rank_hint
+        .map(|value| format!("rank {}", value + 1))
+        .unwrap_or_else(|| "rank baseline".to_string());
+    format!(
+        "{} | {} | {}",
+        render_explainability_source(explainability.source),
+        rank,
+        explainability.summary
+    )
+}
+
+fn render_explainability_lines(explainability: &SuggestionExplainability) -> Vec<String> {
+    let mut lines = vec![format!(
+        "explain: {} | {}",
+        render_explainability_source(explainability.source),
+        explainability.summary
+    )];
+    if let Some(rank_hint) = explainability.rank_hint {
+        lines.push(format!("rank: {}", rank_hint + 1));
+    }
+    if !explainability.score_breakdown.is_empty() {
+        lines.push(format!(
+            "score: {}",
+            explainability
+                .score_breakdown
+                .iter()
+                .map(|component| format!("{}={:.3}", component.label, component.value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(reason) = &explainability.timing_reason {
+        lines.push(format!("timing: {reason}"));
+    }
+    if let Some(reason) = &explainability.suppression_reason {
+        lines.push(format!("suppression: {reason}"));
+    }
+    if !explainability.ranking_factors.is_empty() {
+        lines.push(format!(
+            "factors: {}",
+            explainability
+                .ranking_factors
+                .iter()
+                .map(|factor| format!("{}={}", factor.label, factor.detail))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    lines
+}
+
+fn render_explainability_source(source: ExplainabilitySource) -> &'static str {
+    match source {
+        ExplainabilitySource::Intelligence => "intelligence",
+        ExplainabilitySource::BaselineFallback => "baseline fallback",
+        ExplainabilitySource::MissingMetadata => "missing metadata",
+    }
+}
+
+fn baseline_fallback_explainability(score: f64) -> SuggestionExplainability {
+    SuggestionExplainability {
+        source: ExplainabilitySource::BaselineFallback,
+        action: SuggestionDecisionAction::Keep,
+        rank_hint: None,
+        summary:
+            "Open-core baseline order and wording were used because intelligence was unavailable."
+                .to_string(),
+        score_breakdown: vec![
+            flow_analysis::intelligence_boundary::IntelligenceScoreComponent {
+                label: "baseline_score".to_string(),
+                value: score,
+            },
+        ],
+        timing_reason: None,
+        suppression_reason: None,
+        ranking_factors: vec![
+            flow_analysis::intelligence_boundary::IntelligenceRankingFactor {
+                label: "fallback".to_string(),
+                detail: "No intelligence decision was applied.".to_string(),
+            },
+        ],
+    }
+}
+
+fn suggestion_display_rows(
+    results: Vec<SuggestionDisplayResult>,
+    explain: bool,
+) -> Vec<Vec<String>> {
+    results
+        .into_iter()
+        .map(|suggestion| {
+            let mut row = vec![
+                suggestion.suggestion.suggestion_id.to_string(),
+                format!("{:.3}", suggestion.suggestion.usefulness_score),
+                render_pattern_name(&suggestion.suggestion.signature),
+                suggestion.suggestion.count.to_string(),
+                format_duration(suggestion.suggestion.avg_duration_ms),
+                suggestion.suggestion.freshness,
+                format_timestamp(&suggestion.suggestion.last_seen_at),
+                suggestion.suggestion.proposal_text,
+            ];
+            if explain {
+                row.push(render_explainability_summary(&suggestion.explainability));
+            }
+            row
+        })
+        .collect()
+}
+
+fn suggestion_table_headers(explain: bool) -> Vec<&'static str> {
+    if explain {
+        vec![
+            "id",
+            "score",
+            "pattern",
+            "runs",
+            "avg",
+            "freshness",
+            "last_seen",
+            "description",
+            "explain",
+        ]
+    } else {
+        vec![
+            "id",
+            "score",
+            "pattern",
+            "runs",
+            "avg",
+            "freshness",
+            "last_seen",
+            "description",
+        ]
+    }
 }
 
 fn mark_suggestions_displayed(
@@ -520,8 +682,9 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use flow_analysis::intelligence_boundary::{
-        display_stored_suggestions, rank_stored_suggestions, IntelligenceDisplayDecision,
-        IntelligenceRequest, IntelligenceResponse, SuggestionDecisionAction,
+        display_stored_suggestions, rank_stored_suggestions, ExplainabilitySource,
+        IntelligenceDisplayDecision, IntelligenceRankingFactor, IntelligenceRequest,
+        IntelligenceResponse, IntelligenceScoreComponent, SuggestionDecisionAction,
     };
 
     struct RankingClient;
@@ -542,6 +705,7 @@ mod tests {
                         } else {
                             1
                         }),
+                        explanation: None,
                     })
                     .collect(),
             })
@@ -641,6 +805,7 @@ mod tests {
                             } else {
                                 1
                             }),
+                            explanation: None,
                         })
                         .collect(),
                 })
@@ -687,6 +852,78 @@ mod tests {
             std::env::remove_var("FLOWD_BYPASS_INTELLIGENCE_RANKING");
         }
         assert!(!should_bypass_intelligence_ranking());
+    }
+
+    #[test]
+    fn explainability_summary_stays_compact_and_readable() {
+        let summary = render_explainability_summary(&SuggestionExplainability {
+            source: ExplainabilitySource::Intelligence,
+            action: SuggestionDecisionAction::Keep,
+            rank_hint: Some(0),
+            summary: "Recent usage kept this suggestion first.".to_string(),
+            score_breakdown: vec![IntelligenceScoreComponent {
+                label: "baseline_score".to_string(),
+                value: 0.91,
+            }],
+            timing_reason: None,
+            suppression_reason: None,
+            ranking_factors: vec![IntelligenceRankingFactor {
+                label: "usage".to_string(),
+                detail: "The workflow repeated this morning.".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            summary,
+            "intelligence | rank 1 | Recent usage kept this suggestion first."
+        );
+    }
+
+    #[test]
+    fn explainability_lines_include_timing_and_suppression_details() {
+        let lines = render_explainability_lines(&SuggestionExplainability {
+            source: ExplainabilitySource::Intelligence,
+            action: SuggestionDecisionAction::Delay,
+            rank_hint: Some(1),
+            summary: "Display timing was adjusted.".to_string(),
+            score_breakdown: vec![
+                IntelligenceScoreComponent {
+                    label: "baseline_score".to_string(),
+                    value: 0.75,
+                },
+                IntelligenceScoreComponent {
+                    label: "delay_penalty".to_string(),
+                    value: -0.15,
+                },
+            ],
+            timing_reason: Some("A newer suggestion should be shown first.".to_string()),
+            suppression_reason: Some("A similar suggestion is already active.".to_string()),
+            ranking_factors: vec![IntelligenceRankingFactor {
+                label: "freshness".to_string(),
+                detail: "Newer activity received priority.".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            lines[0],
+            "explain: intelligence | Display timing was adjusted."
+        );
+        assert!(lines.contains(&"rank: 2".to_string()));
+        assert!(lines.contains(&"timing: A newer suggestion should be shown first.".to_string()));
+        assert!(lines.contains(&"suppression: A similar suggestion is already active.".to_string()));
+    }
+
+    #[test]
+    fn baseline_fallback_explainability_is_explicit_and_deterministic() {
+        let first = baseline_fallback_explainability(0.9);
+        let second = baseline_fallback_explainability(0.9);
+
+        assert_eq!(first, second);
+        assert_eq!(first.source, ExplainabilitySource::BaselineFallback);
+        assert_eq!(
+            first.summary,
+            "Open-core baseline order and wording were used because intelligence was unavailable."
+        );
     }
 }
 
