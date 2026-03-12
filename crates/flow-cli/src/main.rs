@@ -9,8 +9,9 @@ use flow_core::config::Config;
 use flow_db::{
     open_database,
     repo::{
-        increment_rejected, increment_shown, increment_snoozed, list_automations, list_patterns,
-        list_recent_sessions, list_suggestions, set_suggestion_status, StoredSuggestion,
+        get_suggestion, increment_rejected, increment_shown, increment_snoozed, list_automations,
+        list_patterns, list_recent_sessions, list_suggestions, set_suggestion_status,
+        StoredSuggestion,
     },
 };
 use flow_exec::{
@@ -36,6 +37,8 @@ enum Commands {
         explain: bool,
     },
     Suggestions {
+        #[command(subcommand)]
+        command: Option<SuggestionsCommand>,
         #[arg(long)]
         explain: bool,
     },
@@ -69,6 +72,11 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SuggestionsCommand {
+    Explain { suggestion_id: i64 },
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -83,7 +91,12 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Status) => println!("flowd status: template skeleton"),
         Some(Commands::Patterns) => render_patterns()?,
         Some(Commands::Suggest { explain }) => render_suggestions(explain)?,
-        Some(Commands::Suggestions { explain }) => render_suggestions_table(explain)?,
+        Some(Commands::Suggestions { command, explain }) => match command {
+            Some(SuggestionsCommand::Explain { suggestion_id }) => {
+                explain_suggestion_command(suggestion_id)?
+            }
+            None => render_suggestions_table(explain)?,
+        },
         Some(Commands::Sessions) => render_sessions()?,
         Some(Commands::Tail) => println!("tail: not implemented"),
         Some(Commands::Approve { suggestion_id }) => approve_automation_command(suggestion_id)?,
@@ -189,6 +202,17 @@ fn render_suggestions_table(explain: bool) -> anyhow::Result<()> {
         &suggestion_table_headers(explain),
         &suggestion_display_rows(suggestions, explain),
     );
+    Ok(())
+}
+
+fn explain_suggestion_command(suggestion_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let resolved = resolve_suggestion_explanation(&conn, &NoopIntelligenceClient, suggestion_id)?;
+
+    for line in render_suggestion_explanation_report(&resolved) {
+        println!("{line}");
+    }
+
     Ok(())
 }
 
@@ -418,6 +442,136 @@ fn suggestion_display_results(
         .collect())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ResolvedSuggestionExplanation {
+    suggestion: StoredSuggestion,
+    action: SuggestionDecisionAction,
+    explainability: SuggestionExplainability,
+}
+
+fn resolve_suggestion_explanation(
+    conn: &rusqlite::Connection,
+    intelligence_client: &dyn IntelligenceClient,
+    suggestion_id: i64,
+) -> anyhow::Result<ResolvedSuggestionExplanation> {
+    let suggestions = list_suggestions(conn).context("failed to read suggestions")?;
+    if let Some(suggestion) = suggestions
+        .iter()
+        .find(|suggestion| suggestion.suggestion_id == suggestion_id)
+        .cloned()
+    {
+        let explainability = if should_bypass_intelligence_ranking() {
+            ResolvedSuggestionExplanation {
+                action: SuggestionDecisionAction::Keep,
+                explainability: baseline_fallback_explainability(suggestion.usefulness_score),
+                suggestion,
+            }
+        } else {
+            IntelligenceBoundary::new(intelligence_client)
+                .evaluate_stored_suggestions_for_display(&suggestions)?
+                .into_iter()
+                .find(|result| result.suggestion.suggestion_id == suggestion_id)
+                .map(|result| ResolvedSuggestionExplanation {
+                    suggestion: result.suggestion,
+                    action: result.action,
+                    explainability: result.explainability,
+                })
+                .expect("evaluated suggestion must exist in display results")
+        };
+
+        return Ok(explainability);
+    }
+
+    if let Some(suggestion) =
+        get_suggestion(conn, suggestion_id).context("failed to read suggestion details")?
+    {
+        anyhow::bail!(
+            "suggestion {suggestion_id} is not available for explanation; current status is {}",
+            suggestion.status
+        );
+    }
+
+    anyhow::bail!("suggestion {suggestion_id} not found");
+}
+
+fn render_suggestion_explanation_report(resolved: &ResolvedSuggestionExplanation) -> Vec<String> {
+    let suggestion = &resolved.suggestion;
+    let explainability = &resolved.explainability;
+    let mut lines = vec![
+        format!("suggestion: {}", suggestion.suggestion_id),
+        "status: pending".to_string(),
+        format!("decision: {}", render_decision_action(resolved.action)),
+        format!(
+            "source: {}",
+            render_explainability_source(explainability.source)
+        ),
+        format!("pattern: {}", suggestion.canonical_summary),
+        format!("proposal: {}", suggestion.proposal_text),
+        format!("score: {:.3}", suggestion.usefulness_score),
+        format!("freshness: {}", suggestion.freshness),
+        format!("last_seen: {}", format_timestamp(&suggestion.last_seen_at)),
+        format!("summary: {}", explainability.summary),
+        format!(
+            "rank: {}",
+            explainability
+                .rank_hint
+                .map(|value| (value + 1).to_string())
+                .unwrap_or_else(|| "baseline".to_string())
+        ),
+    ];
+
+    if !explainability.score_breakdown.is_empty() {
+        lines.push("score_breakdown:".to_string());
+        lines.extend(
+            explainability
+                .score_breakdown
+                .iter()
+                .map(|component| format!("  {}={:.3}", component.label, component.value)),
+        );
+    }
+
+    if let Some(reason) = &explainability.timing_reason {
+        lines.push(format!("timing_reason: {reason}"));
+    }
+
+    if let Some(reason) = &explainability.suppression_reason {
+        lines.push(format!("suppression_reason: {reason}"));
+    }
+
+    if !explainability.ranking_factors.is_empty() {
+        lines.push("ranking_factors:".to_string());
+        lines.extend(
+            explainability
+                .ranking_factors
+                .iter()
+                .map(|factor| format!("  {}={}", factor.label, factor.detail)),
+        );
+    }
+
+    lines.push(format!(
+        "feedback: shown={}, accepted={}, rejected={}, snoozed={}",
+        suggestion.shown_count,
+        suggestion.accepted_count,
+        suggestion.rejected_count,
+        suggestion.snoozed_count
+    ));
+
+    if let Some(value) = &suggestion.last_shown_ts {
+        lines.push(format!("last_shown: {}", format_timestamp(value)));
+    }
+    if let Some(value) = &suggestion.last_accepted_ts {
+        lines.push(format!("last_accepted: {}", format_timestamp(value)));
+    }
+    if let Some(value) = &suggestion.last_rejected_ts {
+        lines.push(format!("last_rejected: {}", format_timestamp(value)));
+    }
+    if let Some(value) = &suggestion.last_snoozed_ts {
+        lines.push(format!("last_snoozed: {}", format_timestamp(value)));
+    }
+
+    lines
+}
+
 fn mark_suggestions_displayed_from_results(
     conn: &mut rusqlite::Connection,
     suggestions: &[SuggestionDisplayResult],
@@ -487,6 +641,14 @@ fn render_explainability_source(source: ExplainabilitySource) -> &'static str {
         ExplainabilitySource::Intelligence => "intelligence",
         ExplainabilitySource::BaselineFallback => "baseline fallback",
         ExplainabilitySource::MissingMetadata => "missing metadata",
+    }
+}
+
+fn render_decision_action(action: SuggestionDecisionAction) -> &'static str {
+    match action {
+        SuggestionDecisionAction::Keep => "shown",
+        SuggestionDecisionAction::Delay => "delayed",
+        SuggestionDecisionAction::Suppress => "suppressed",
     }
 }
 
@@ -924,6 +1086,78 @@ mod tests {
             first.summary,
             "Open-core baseline order and wording were used because intelligence was unavailable."
         );
+    }
+
+    #[test]
+    fn suggestion_explanation_report_uses_intelligence_metadata_when_available() {
+        let resolved = ResolvedSuggestionExplanation {
+            suggestion: stored_suggestion(7, "CreateFile:invoice-a", 0.9),
+            action: SuggestionDecisionAction::Delay,
+            explainability: SuggestionExplainability {
+                source: ExplainabilitySource::Intelligence,
+                action: SuggestionDecisionAction::Delay,
+                rank_hint: Some(1),
+                summary: "Display timing was adjusted.".to_string(),
+                score_breakdown: vec![
+                    IntelligenceScoreComponent {
+                        label: "baseline_score".to_string(),
+                        value: 0.9,
+                    },
+                    IntelligenceScoreComponent {
+                        label: "recency_penalty".to_string(),
+                        value: -0.2,
+                    },
+                ],
+                timing_reason: Some("A newer suggestion should be shown first.".to_string()),
+                suppression_reason: None,
+                ranking_factors: vec![IntelligenceRankingFactor {
+                    label: "recency".to_string(),
+                    detail: "A more recent workflow was prioritized.".to_string(),
+                }],
+            },
+        };
+
+        let lines = render_suggestion_explanation_report(&resolved);
+
+        assert!(lines.contains(&"decision: delayed".to_string()));
+        assert!(lines.contains(&"source: intelligence".to_string()));
+        assert!(lines.contains(&"rank: 2".to_string()));
+        assert!(
+            lines.contains(&"timing_reason: A newer suggestion should be shown first.".to_string())
+        );
+        assert!(lines.contains(&"  recency_penalty=-0.200".to_string()));
+        assert!(lines.contains(&"  recency=A more recent workflow was prioritized.".to_string()));
+    }
+
+    #[test]
+    fn suggestion_explanation_report_preserves_suppression_reason() {
+        let resolved = ResolvedSuggestionExplanation {
+            suggestion: stored_suggestion(8, "CreateFile:invoice-b", 0.8),
+            action: SuggestionDecisionAction::Suppress,
+            explainability: SuggestionExplainability {
+                source: ExplainabilitySource::Intelligence,
+                action: SuggestionDecisionAction::Suppress,
+                rank_hint: Some(2),
+                summary: "A similar suggestion is already active.".to_string(),
+                score_breakdown: vec![IntelligenceScoreComponent {
+                    label: "baseline_score".to_string(),
+                    value: 0.8,
+                }],
+                timing_reason: None,
+                suppression_reason: Some("A similar suggestion is already active.".to_string()),
+                ranking_factors: vec![IntelligenceRankingFactor {
+                    label: "clustering".to_string(),
+                    detail: "Similar suggestions were clustered.".to_string(),
+                }],
+            },
+        };
+
+        let lines = render_suggestion_explanation_report(&resolved);
+
+        assert!(lines.contains(&"decision: suppressed".to_string()));
+        assert!(lines
+            .contains(&"suppression_reason: A similar suggestion is already active.".to_string()));
+        assert!(lines.contains(&"  clustering=Similar suggestions were clustered.".to_string()));
     }
 }
 
