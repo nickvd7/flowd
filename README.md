@@ -4,161 +4,169 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Local-first](https://img.shields.io/badge/local--first-yes-green)
 
-**flowd is a local-first automation engine that learns your workflows by observing real activity on your computer.**
+Workflow automation that learns from how you work.
 
-Instead of writing automation rules manually, flowd records repeated actions, turns them into structured workflow patterns, and proposes safe automations you can review and approve.
+flowd observes local file workflows, detects repeated patterns, and suggests automations you can approve from the terminal.
 
-flowd is designed for people who want automation **without configuration, cloud dependencies, or hidden behavior**.
+- Local-first
+- Terminal-first
+- Deterministic automations
+- Safe approvals with undo
 
-Key ideas:
+## What is flowd?
 
-- **Observe real work first** instead of designing rules
-- **Detect repeated workflows automatically**
-- **Propose safe automations you can inspect and approve**
+flowd solves a simple problem: many file workflows are repetitive, but writing automation rules by hand is tedious. It watches local activity, recognizes repeated sequences such as rename and move actions, and turns them into suggestions you can inspect before anything is automated. Approved automations run locally, and the system remains useful without any cloud service or separate intelligence layer.
 
-In short: **observe first, automate later.**
+## Demo
 
---- 
+### Example: automatically organizing invoices
 
-## Real workflow examples
+You download invoice PDFs into `~/Downloads` and keep renaming and moving them into `~/Documents/Accounting/Invoices`.
 
-Examples of workflows flowd can learn automatically:
-
-```
-rename invoice → move to archive
-save screenshot → move to screenshots folder
-move downloads → organize by file type
-rename document → move to project folder
-```
-
-flowd observes these actions as you perform them and proposes automations after the pattern repeats several times.
-
-No rules. No configuration. Just observation.
-
----
-
-## Example
-
-flowd observes your repeated workflow:
-
-```
-rename invoice → move to archive
-```
-
-After detecting this pattern several times it suggests:
-
-```
-archive invoices automatically
-```
-
-Inspect detected workflows with:
+1. flowd observes the repeated file actions in `~/Downloads`.
+2. It detects that the same rename-and-move workflow keeps happening.
+3. It creates a suggestion for that pattern.
+4. You inspect the suggestion in the CLI.
+5. You approve it and future invoices can be organized automatically.
 
 ```bash
-cargo run -p flow-cli patterns
-cargo run -p flow-cli suggestions
-cargo run -p flow-cli approve <suggestion_id>
+$ flowctl suggestions
+
+Suggestion 3:
+Rename and move invoice PDFs to ~/Documents/Accounting/Invoices
+
+$ flowctl approve 3
+
+Approved suggestion 3 as automation 1
 ```
 
----
+After approval, future matching files can be handled by the generated automation instead of repeating the same manual steps.
 
-## Why flowd
+## Installation
 
-Most automation tools require users to manually design rules like:
+### Install with cargo
 
-```
-IF file renamed
-THEN move file
-```
+If you are using a packaged release, install flowd with:
 
-But people often don't know which tasks they repeat most.
-
-flowd takes the opposite approach:
-
-1. observe real workflows
-2. detect repeated patterns
-3. suggest safe automations
-4. let the user approve them
-
-Automation becomes **discoverable instead of configurable**.
-
----
-
-## How it works
-
-flowd continuously records filesystem activity and builds a local model of your workflows.
-
-Pipeline:
-
-```
-filesystem watcher
-      ↓
-raw_events
-      ↓
-normalized_events
-      ↓
-sessions
-      ↓
-patterns
-      ↓
-suggestions
-      ↓
-automations
+```bash
+cargo install flowd
 ```
 
-Everything is stored locally in **SQLite**.
+In this repository today, install the local binaries directly:
 
----
-
-## Architecture overview
-
-flowd is built as a local-first workflow discovery pipeline. It observes activity on your machine, stores workflow facts in SQLite, detects repeated patterns, generates baseline suggestions, and turns approved suggestions into automations.
-
-```mermaid
-flowchart TD
-    A[User activity] --> B[flowd adapters]
-    B --> C[SQLite facts and feedback history]
-    C --> D[Sessions and patterns]
-    D --> E[Baseline suggestions]
-    E --> F{Optional intelligence}
-    F -->|No| G[CLI suggestions with baseline explainability]
-    F -->|flowd -> flowd-intelligence| H[Display decisions and explanation metadata]
-    H --> G
-    G --> I[Approval, execution, and undo]
+```bash
+cargo install --path crates/flow-cli
+cargo install --path crates/flow-daemon
 ```
 
-`flowd` owns facts and actions: event capture, persistence, sessions, patterns, baseline suggestions, automations, execution, undo, feedback history, and explainability normalization. `flowd-intelligence`, when present, only owns prioritization, timing, suppression, personalization, clustering, wording, and display decisions. The dependency direction is one-way: `flowd -> flowd-intelligence`.
+### Start the daemon
 
-Open-core remains functional without private intelligence. For the canonical architecture overview, repository ownership split, hard boundary, and practical integration flow, see [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md).
+The daemon starts workflow observation and, by default, watches `~/Downloads`. It stores state locally in `./flowd.db`.
 
-The system is intentionally modular:
+```bash
+flowd daemon start
+```
 
-- **flow-adapters** — capture local system events
-- **flow-analysis** — open-core analysis pipeline and the single optional intelligence client boundary
-- **flow-core** — shared domain types
-- **flow-db** — SQLite persistence and migrations
-- **flow-patterns** — normalization, sessions, pattern detection
-- **flow-cli** — command-line interface
-- **flow-daemon** — background event processing
-- **flow-dsl** — automation specification
-- **flow-exec** — dry-run and execution engine
+From this repository, the current daemon binary is:
 
-For lower-level architecture detail see [docs/architecture.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture.md). Start with [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md) if you are new to the repo.
+```bash
+flow-daemon
+```
 
----
+If you want to change observed folders or the database path, create `flowd.toml` in the project directory.
 
-## Current capabilities
+```toml
+database_path = "./flowd.db"
+observed_folders = ["~/Downloads"]
+```
 
-- real filesystem event watcher
-- SQLite event storage
-- event normalization
-- workflow session detection
-- repeated pattern discovery
-- pattern scoring
-- suggestion generation
-- CLI inspection tools
-- safe filesystem automation engine (rename, move)
+### Inspect suggestions
 
----
+```bash
+flowctl suggestions
+```
+
+### Approve an automation
+
+```bash
+flowctl approve <id>
+```
+
+## Usage
+
+The core loop is:
+
+```text
+observe -> detect patterns -> suggest automations -> approve
+```
+
+Useful commands:
+
+```bash
+flowctl patterns
+flowctl suggestions
+flowctl approve <suggestion_id>
+flowctl automations
+flowctl dry-run <automation_id>
+flowctl run <automation_id>
+flowctl runs
+flowctl undo <run_id>
+```
+
+All state stays local. You can inspect the SQLite database directly:
+
+```bash
+sqlite3 flowd.db "select * from patterns limit 10;"
+sqlite3 flowd.db "select * from suggestions limit 10;"
+sqlite3 flowd.db "select * from automations limit 10;"
+```
+
+## Architecture
+
+flowd follows a local-first workflow architecture:
+
+- Adapters capture local events.
+- Core normalizes and persists them.
+- Patterns detect repeated workflows.
+- Suggestions propose automations.
+- Automations execute approved workflows.
+
+The main pipeline is:
+
+```text
+filesystem events
+  -> normalized events
+  -> sessions
+  -> patterns
+  -> suggestions
+  -> approved automations
+```
+
+`flowd` is the open-core workflow engine. It owns event capture, persistence, sessions, pattern detection, baseline suggestions, automations, execution, undo, and explainability plumbing.
+
+An optional private decision layer, `flowd-intelligence`, can improve suggestion quality through ranking, timing, suppression, personalization, clustering, wording, and display decisions. The integration direction is one-way:
+
+```text
+flowd -> flowd-intelligence
+```
+
+flowd remains fully functional without the intelligence layer.
+
+Workspace crates:
+
+```text
+flow-core        shared domain types and configuration
+flow-analysis    open-core analysis pipeline and intelligence boundary
+flow-daemon      background observation
+flow-cli         command-line interface
+flow-db          SQLite persistence and migrations
+flow-adapters    local event capture
+flow-patterns    normalization, sessions, pattern detection
+flow-dsl         automation specification
+flow-exec        dry-run and execution
+```
+
+For more detail, see [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md) and [docs/architecture.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture.md).
 
 ## Project principles
 
@@ -168,124 +176,19 @@ All data stays on your machine.
 
 ### Deterministic
 
-The same input always produces the same detected workflows.
+The same input produces the same detected workflows.
 
 ### Inspectable
 
-All internal state can be inspected via SQLite.
+State is stored locally and can be inspected in SQLite.
 
 ### Safe
 
-Early automation support focuses on safe filesystem operations only.
-
----
-
-## Workspace crates
-
-```
-flow-core        shared domain types and configuration
-flow-analysis    open-core analysis pipeline and the single optional intelligence client boundary
-flow-daemon      background event watcher
-flow-cli         command line interface
-flow-db          SQLite persistence and migrations
-flow-adapters    system event capture
-flow-patterns    normalization, sessions, pattern detection
-flow-dsl         automation specification
-flow-exec        dry-run and execution
-```
-
----
-
-## 30‑second demo
-
-Start the daemon that observes filesystem activity:
-
-```bash
-cargo run -p flow-daemon
-```
-
-Do your normal work for a moment (rename files, move downloads, organize folders).
-
-Then inspect what flowd detected:
-
-```bash
-cargo run -p flow-cli patterns
-cargo run -p flow-cli suggestions
-cargo run -p flow-cli approve <suggestion_id>
-cargo run -p flow-cli dry-run <automation_id>
-cargo run -p flow-cli run <automation_id>
-```
-
-flowd will show workflows it discovered from your activity and propose potential automations.
-
-This is the core loop of flowd:
-
-```
-observe → detect patterns → propose automations
-```
-
----
-
-## Quick start
-
-Build the project:
-
-```bash
-cargo build
-```
-
-Run tests:
-
-```bash
-cargo test
-```
-
-Start the daemon:
-
-```bash
-cargo run -p flow-daemon
-```
-
-Inspect workflows with the CLI:
-
-```bash
-cargo run -p flow-cli patterns
-cargo run -p flow-cli suggestions
-cargo run -p flow-cli approve <suggestion_id>
-cargo run -p flow-cli automations
-cargo run -p flow-cli dry-run <automation_id>
-cargo run -p flow-cli run <automation_id>
-cargo run -p flow-cli sessions
-```
-
----
-
-## Inspecting the database
-
-All state is stored locally in `flowd.db`.
-
-Examples:
-
-```bash
-sqlite3 flowd.db "select * from raw_events limit 10;"
-sqlite3 flowd.db "select * from normalized_events limit 10;"
-sqlite3 flowd.db "select * from patterns limit 10;"
-sqlite3 flowd.db "select * from suggestions limit 10;"
-```
-
----
+Automation focuses on explicit approval, dry runs, execution tracking, and undo.
 
 ## Language policy
 
 All documentation, code comments, commit messages, issue discussions, and contributor-facing text must be written in English.
-
-This ensures:
-
-- accessibility for global contributors
-- better compatibility with AI coding agents
-- consistent documentation quality
-
----
 
 ## Included planning files
 
@@ -294,54 +197,46 @@ This ensures:
 - `PROMPTS_FOR_CODEX.md`
 - `PRIVATE_CORE_BOUNDARY.md`
 
----
-
 ## Roadmap
 
 flowd is being built incrementally with a focus on reliability, transparency, and local-first automation.
 
-### Phase 1 — Observation (current)
+### Phase 1 - Observation
 
 - filesystem event watcher
 - raw event persistence
 - event normalization
 - workflow session detection
 
-### Phase 2 — Pattern discovery
+### Phase 2 - Pattern discovery
 
 - repeated workflow detection
 - pattern scoring
 - suggestion generation
 - CLI inspection tools
 
-### Phase 3 — Safe automation
+### Phase 3 - Safe automation
 
 - automation DSL
 - dry-run execution engine
 - explicit user approval for automations
 - safe filesystem automation primitives
 
-### Phase 4 — Expanded observation
+### Phase 4 - Expanded observation
 
 - terminal command workflows
 - editor and IDE integrations
 - application event adapters
 
-### Phase 5 — Intelligence layer
+### Phase 5 - Intelligence layer
 
 - pattern summarization
 - automation refinement
-- optional local LLM assistance
-
----
+- optional local assistance
 
 ## Status
 
-flowd is currently in **early development**.
-
-The workflow detection pipeline is implemented and evolving toward safe local automation execution.
-
----
+flowd is in early development. The workflow detection pipeline is implemented and evolving toward safe local automation execution.
 
 ## License
 
