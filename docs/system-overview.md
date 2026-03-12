@@ -1,42 +1,46 @@
 # flowd System Overview
 
-`flowd` is the open-core workflow engine. It owns local observation, persistence, session building, pattern detection, baseline suggestion generation, CLI display, automation approval, execution, and undo.
+`flowd` is the public open-core workflow engine. It owns facts and actions: event capture, persistence, sessions, patterns, baseline suggestions, automations, execution, undo, feedback history, and explainability normalization.
 
-`flowd-intelligence` is an optional private decision layer. It does not replace the engine. It evaluates already-generated suggestion candidates and returns display-oriented decisions such as ranking, timing, suppression, personalization, clustering, proposal wording, and display orchestration.
+`flowd-intelligence` is a separate private decision layer. It does not replace the engine. It only evaluates already-generated suggestion candidates and returns decision metadata for prioritization, timing, suppression, personalization, clustering, wording, and display decisions.
 
-The full ecosystem stays local-first. The open core remains deterministic and fully functional even when no private intelligence is configured.
+The architecture stays local-first and deterministic. `flowd` remains fully functional when no private intelligence is configured.
 
 ## 1. System overview
 
-The full production flow is:
+The end-to-end system is:
 
 ```text
 User activity
   -> event capture
-  -> normalization
+  -> persistence
   -> sessions
-  -> pattern detection
-  -> suggestion generation
-  -> intelligence evaluation (optional)
-  -> CLI display
-  -> automation execution
+  -> patterns
+  -> baseline suggestions
+  -> optional intelligence evaluation
+  -> explainable CLI suggestions
+  -> automations
+  -> execution
+  -> undo
 ```
 
-Expanded end-to-end flow:
+Expanded flow:
 
 1. A user performs normal work on the local machine.
-2. `flowd` captures events through adapters such as filesystem, terminal, browser, clipboard, or window observers.
-3. `flowd` persists raw events and normalized events in SQLite.
-4. `flowd` groups normalized events into sessions.
+2. `flowd` captures local events through adapters.
+3. `flowd` persists raw and normalized workflow facts in SQLite.
+4. `flowd` groups events into sessions.
 5. `flowd` detects repeated patterns across sessions.
-6. `flowd` generates baseline suggestions from those patterns.
-7. `flowd` may optionally send narrow suggestion DTOs through the intelligence boundary for private evaluation.
-8. `flowd` maps any returned ranking, timing, suppression, wording, and explainability metadata back into local deterministic display records.
-9. `flowd` displays the final suggestion list in the CLI.
-10. The user may approve a suggestion and execute the resulting automation.
-11. `flowd` records execution results and undo data in the open core.
+6. `flowd` generates deterministic baseline suggestions from those patterns.
+7. `flowd` records and maintains suggestion feedback history in open-core storage.
+8. `flowd` may send narrow suggestion DTOs plus feedback-history signals through the intelligence boundary for optional private evaluation.
+9. `flowd-intelligence` may return display decisions such as prioritization, delay, suppression, wording, clustering, and structured explanation metadata.
+10. `flowd` normalizes any returned explanation metadata into local explainability records and falls back to explicit baseline explanations when no private decision exists.
+11. `flowd` shows the resulting suggestion list in the CLI.
+12. The user may approve a suggestion into an automation.
+13. `flowd` owns planning, execution, execution history, and undo data.
 
-This is the core architectural rule for the ecosystem: open core creates facts and performs actions; private intelligence may improve the decision layer over those facts.
+The canonical rule is simple: `flowd` owns facts and actions. `flowd-intelligence` owns display decisions over those facts.
 
 ## 2. Ownership by repository
 
@@ -47,23 +51,40 @@ This is the core architectural rule for the ecosystem: open core creates facts a
 - sessions
 - patterns
 - baseline suggestions
-- automation approval
+- automations
 - execution
 - undo
+- feedback history
+- explainability normalization
 
-In practice that means `flowd` owns local adapters, SQLite schema and migrations, event normalization, session rebuilding, pattern detection, suggestion persistence, feedback history persistence, CLI rendering, automation specification, dry-run planning, execution, and undo logging.
+In practice that means the public repository owns adapters, SQLite schema and migrations, event normalization, session rebuilding, pattern detection, suggestion persistence, feedback history persistence, CLI rendering, automation specification, dry-run planning, execution, execution logs, undo logs, and deterministic fallback explanations.
 
 `flowd-intelligence` owns:
 
-- ranking
+- prioritization
 - timing
 - suppression
 - personalization
 - clustering
-- proposal wording
-- display orchestration
+- wording
+- display decisions
 
-The private repository can decide which suggestions to surface, when to surface them, how to cluster them, and how to word them. It does not become the system of record for workflow state.
+In practice that means the private repository can decide which existing suggestions should be surfaced first, delayed, hidden, grouped, or reworded. It does not become the system of record for workflow state.
+
+Feedback history belongs to `flowd`, not `flowd-intelligence`, because it is part of suggestion state and is required for deterministic fallback behavior. The current feedback-history fields are:
+
+- `shown_count`
+- `accepted_count`
+- `rejected_count`
+- `snoozed_count`
+- `last_shown_ts`
+- `last_accepted_ts`
+- `last_rejected_ts`
+- `last_snoozed_ts`
+
+These fields are persisted by `flow-db`, exposed through repository models, and mapped into the boundary DTO so private intelligence can consume them without owning storage.
+
+Explainability follows the same rule. `flowd-intelligence` may return structured reasons, but `flowd` owns the final local explainability shape shown to users.
 
 ## 3. Hard architecture boundary
 
@@ -75,75 +96,68 @@ flowd -> flowd-intelligence
 
 Never the reverse.
 
-The private intelligence layer must never own:
+Hard boundary rules:
 
-- storage
-- migrations
-- execution
-- event capture
-
-It also must not become the source of truth for sessions, patterns, or baseline suggestions.
-
-Boundary rules:
-
-- `flowd` exports narrow DTOs rather than internal database rows or executor internals.
-- `flowd` calls the private layer from one explicit boundary module: [crates/flow-analysis/src/intelligence_boundary.rs](/Users/nickvandort/Documents/Coding/flowd/crates/flow-analysis/src/intelligence_boundary.rs).
+- `flowd` may call `flowd-intelligence`.
+- `flowd-intelligence` must not call back into `flowd`.
+- `flowd` exports narrow DTOs, not internal database rows, migrations, or executor internals.
 - `flowd-intelligence` returns display decisions, not persistence commands or execution commands.
-- Explainability is optional and deterministic: the private layer may return structured reasons, but `flowd` always normalizes them locally and falls back explicitly when no explanation is available.
-- If the private layer is absent or fails, `flowd` falls back to the baseline open-core flow.
+- `flowd-intelligence` must never own event capture, persistence, sessions, patterns, baseline suggestion generation, approval, execution, or undo.
+- Open-core must remain usable without private intelligence.
 
-The hard boundary is what keeps the public engine viable as a standalone product and prevents private code from absorbing core system responsibilities.
+The one explicit boundary module inside the public repo is [crates/flow-analysis/src/intelligence_boundary.rs](/Users/nickvandort/Documents/Coding/flowd/crates/flow-analysis/src/intelligence_boundary.rs). All private integration should pass through that module so the rest of the workspace stays free of private contracts.
+
+This boundary is what keeps the open-core engine viable as a standalone product. `flowd-intelligence` can improve decision quality, but it cannot absorb ownership of core system responsibilities.
 
 ## 4. Practical integration flow
 
-### Baseline open-core flow
+Baseline open-core flow:
 
 ```text
 User activity
   -> adapters
   -> SQLite storage
-  -> normalization
-  -> sessions
-  -> pattern detection
-  -> baseline suggestion generation
-  -> CLI suggestions
+  -> sessions and patterns
+  -> baseline suggestions
+  -> CLI display
   -> approval
-  -> automation execution
+  -> execution
+  -> undo
 ```
 
-In this mode:
+In baseline mode:
 
-- `flowd` observes and stores the activity history.
-- `flowd` generates baseline suggestions directly from repeated patterns.
-- `flowd` displays suggestions in the CLI without any private dependency.
-- `flowd` owns approval, execution, run logging, and undo.
+- `flowd` captures, stores, analyzes, and displays workflow state without any private dependency.
+- suggestion ordering remains deterministic and local.
+- feedback history still accumulates in `flowd`.
+- explainability is explicit and local through baseline fallback messages.
 
-### Intelligence-enhanced flow
+Intelligence-enhanced flow:
 
 ```text
 User activity
   -> adapters
   -> SQLite storage
-  -> normalization
-  -> sessions
-  -> pattern detection
-  -> baseline suggestion generation
-  -> intelligence boundary in flowd
+  -> sessions and patterns
+  -> baseline suggestions
+  -> boundary DTO mapping in flowd
   -> flowd-intelligence evaluation
-  -> CLI suggestions
+  -> local explainability normalization
+  -> CLI display
   -> approval
-  -> automation execution
+  -> execution
+  -> undo
 ```
 
-In this mode:
+In intelligence mode:
 
-- `flowd` still creates and persists suggestion candidates.
-- `flowd` packages candidate data and local feedback history into DTOs.
-- `flowd-intelligence` evaluates ranking, timing, suppression, personalization, clustering, wording, and orchestration.
-- `flowd` applies those decisions to CLI presentation.
+- `flowd` still creates and persists all candidate suggestions.
+- `flowd` packages candidate state, recency signals, and feedback history into DTOs.
+- `flowd-intelligence` evaluates prioritization, timing, suppression, personalization, clustering, wording, and display decisions.
+- `flowd` maps those decisions back into local presentation records.
 - `flowd` remains the only owner of approval, execution, undo, and persistence.
 
-Fallback rules:
+Fallback behavior:
 
 - If no private client exists, baseline suggestions are shown directly.
 - If the private client returns no decisions, baseline suggestions are shown directly.
@@ -151,74 +165,63 @@ Fallback rules:
 
 ## 5. Repository structure
 
-Intended public repository structure:
+Current public repository structure:
 
 ```text
 flowd/
 ├─ crates/
-│  ├─ flow-adapters/   event capture adapters
+│  ├─ flow-adapters/   local event capture adapters
 │  ├─ flow-analysis/   baseline suggestion generation and intelligence boundary
 │  ├─ flow-cli/        CLI display and operator commands
 │  ├─ flow-core/       shared domain types and configuration
-│  ├─ flow-daemon/     long-running observation and analysis orchestration
+│  ├─ flow-daemon/     observation and analysis orchestration
 │  ├─ flow-db/         SQLite persistence, queries, and migrations
 │  ├─ flow-dsl/        automation specification
 │  ├─ flow-exec/       approval, execution, and undo
 │  └─ flow-patterns/   normalization, sessions, and pattern detection
 ├─ docs/
-│  ├─ system-overview.md
 │  ├─ architecture.md
 │  ├─ architecture-diagram.md
+│  ├─ automation-dsl.md
 │  ├─ event-model.md
-│  └─ automation-dsl.md
+│  ├─ privacy.md
+│  └─ system-overview.md
 └─ fixtures/
 ```
 
-Intended private repository structure:
+Private repository shape:
 
 ```text
 flowd-intelligence/
 ├─ crates/
-│  └─ flow-intelligence/   ranking and display decision modules
+│  └─ flow-intelligence/   private decision logic
 ├─ fixtures/               deterministic replay scenarios
 └─ docs/                   private implementation notes
 ```
 
-`flowd` stays responsible for the end-to-end engine. `flowd-intelligence` stays responsible for private decision logic only.
+Repository ownership should stay easy to reason about: `flowd` owns the engine, and `flowd-intelligence` owns only the optional decision layer.
 
-## 6. Feedback history integration
+## 6. Design rules
 
-Feedback history belongs to the open core because it is part of suggestion state and is needed for deterministic fallback behavior.
-
-Current feedback-history fields:
-
-- `shown_count`
-- `accepted_count`
-- `rejected_count`
-- `snoozed_count`
-- `last_shown_ts`
-- `last_accepted_ts`
-- `last_rejected_ts`
-- `last_snoozed_ts`
-
-Design rules for these fields:
-
-- They are persisted in the `suggestions` table by `flow-db`.
-- They are exposed through repository-layer models such as `StoredSuggestion` and `SuggestionDetails`.
-- They are included in the intelligence boundary DTO so they can be passed through `flowd -> flowd-intelligence` without exposing storage internals.
-- They remain owned by `flowd` even when private intelligence consumes them for ranking, suppression, or personalization decisions.
-
-This means feedback history can influence private decision-making later without moving storage or lifecycle ownership out of the public repository.
-
-## 7. Design rules
-
-- Keep the open core local-first.
+- Keep the system local-first.
 - Keep the baseline open-core path deterministic.
-- Keep the dependency direction one-way: `flowd` may call `flowd-intelligence`, never the reverse.
+- Keep the dependency direction one-way: `flowd -> flowd-intelligence`.
+- Keep `flowd` as the owner of facts and actions.
+- Keep `flowd-intelligence` as the owner of prioritization, timing, suppression, personalization, clustering, wording, and display decisions.
 - Keep the boundary narrow and DTO-based.
-- Keep persistence, migrations, execution, and event capture inside `flowd`.
-- Keep approval and undo inside `flowd`.
+- Keep persistence, migrations, feedback history, execution, and undo inside `flowd`.
+- Keep explainability explicit: private reasons may enrich decisions, but `flowd` must always normalize or replace them locally.
 - Keep private intelligence optional.
-- Keep terminology consistent: patterns produce baseline suggestions; intelligence evaluates those suggestions for display decisions.
+- Do not add cloud dependencies to the core architecture.
+- Do not add GUI-only assumptions to the system model.
+- Keep contributor-facing and user-facing text in English.
+
+## 7. Next integration steps
+
+- Keep the boundary contract in [crates/flow-analysis/src/intelligence_boundary.rs](/Users/nickvandort/Documents/Coding/flowd/crates/flow-analysis/src/intelligence_boundary.rs) stable and versioned by code review discipline.
+- Extend deterministic fixture coverage for boundary DTO mapping, feedback-history propagation, and explainability fallback behavior.
+- Keep repository models and migration docs aligned whenever feedback-history fields change.
+- Add more private replay scenarios in `flowd-intelligence` without moving state ownership out of `flowd`.
+- Preserve graceful degradation so new private decision features never block the open-core baseline path.
 
 For lower-level detail, see [docs/architecture.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture.md), [docs/architecture-diagram.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture-diagram.md), and [docs/event-model.md](/Users/nickvandort/Documents/Coding/flowd/docs/event-model.md).
