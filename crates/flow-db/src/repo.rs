@@ -110,6 +110,7 @@ pub struct StoredAutomationSpec {
     pub automation_id: i64,
     pub suggestion_id: Option<i64>,
     pub status: String,
+    pub accepted_at: Option<String>,
     pub summary: String,
     pub spec_yaml: String,
 }
@@ -848,7 +849,7 @@ pub fn get_automation(
 ) -> rusqlite::Result<Option<StoredAutomationSpec>> {
     let mut statement = conn.prepare(
         r#"
-        SELECT id, suggestion_id, state, COALESCE(summary, ''), spec_yaml
+        SELECT id, suggestion_id, state, accepted_at, COALESCE(summary, ''), spec_yaml
         FROM automations
         WHERE id = ?1
         "#,
@@ -859,8 +860,9 @@ pub fn get_automation(
             automation_id: row.get(0)?,
             suggestion_id: row.get(1)?,
             status: row.get(2)?,
-            summary: row.get(3)?,
-            spec_yaml: row.get(4)?,
+            accepted_at: row.get(3)?,
+            summary: row.get(4)?,
+            spec_yaml: row.get(5)?,
         })
     });
 

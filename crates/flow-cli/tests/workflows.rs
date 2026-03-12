@@ -4,8 +4,9 @@ use flow_analysis::refresh_analysis_state;
 use flow_db::{
     migrations::run_migrations,
     repo::{
-        insert_normalized_event_record, insert_raw_event, list_automations, list_normalized_events,
-        list_patterns, list_pending_file_raw_events, list_recent_sessions, list_suggestions,
+        get_automation, insert_normalized_event_record, insert_raw_event, list_automations,
+        list_normalized_events, list_patterns, list_pending_file_raw_events, list_recent_sessions,
+        list_suggestions,
     },
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
@@ -319,6 +320,74 @@ fn disable_and_enable_update_automation_status_in_cli_output() {
     assert!(String::from_utf8(enabled.stdout)
         .unwrap()
         .contains("active"));
+}
+
+#[test]
+fn automations_show_renders_detailed_report() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+    approve_suggestion(&db_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["automations", "show", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let conn = Connection::open(&db_path).unwrap();
+    let automation = get_automation(&conn, 1).unwrap().unwrap();
+    let spec = flow_dsl::parse_spec(&automation.spec_yaml).unwrap();
+    let expected = format_automation_report(&automation, &spec);
+    assert_eq!(stdout, expected);
+    assert!(stdout.contains("trigger:"));
+    assert!(stdout.contains("actions:"));
+    assert!(stdout.contains("rename template="));
+    assert!(stdout.contains("move destination="));
+}
+
+#[test]
+fn automations_show_reports_missing_id() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["automations", "show", "999"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("automation 999 not found"));
+}
+
+#[test]
+fn automations_show_reflects_current_status() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+    approve_suggestion(&db_path);
+
+    let disable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["disable", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(disable.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["automations", "show", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("status: disabled"));
 }
 
 #[test]
@@ -868,6 +937,68 @@ fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+fn format_automation_report(
+    automation: &flow_db::repo::StoredAutomationSpec,
+    spec: &AutomationSpec,
+) -> String {
+    let mut lines = vec![
+        format!("automation: {}", automation.automation_id),
+        format!("spec_id: {}", spec.id),
+        format!("title: {}", render_optional_value(&automation.summary)),
+        format!("status: {}", automation.status),
+        format!(
+            "suggestion: {}",
+            automation
+                .suggestion_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        format!(
+            "accepted: {}",
+            automation
+                .accepted_at
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        "trigger:".to_string(),
+        format!("  type: {}", spec.trigger.r#type),
+        format!(
+            "  path: {}",
+            render_optional_value(spec.trigger.path.as_deref().unwrap_or(""))
+        ),
+        format!(
+            "  extension: {}",
+            render_optional_value(spec.trigger.extension.as_deref().unwrap_or(""))
+        ),
+        format!(
+            "  name_contains: {}",
+            render_optional_value(spec.trigger.name_contains.as_deref().unwrap_or(""))
+        ),
+        "actions:".to_string(),
+    ];
+
+    if spec.actions.is_empty() {
+        lines.push("  - none".to_string());
+    } else {
+        lines.extend(
+            spec.actions.iter().enumerate().map(|(index, action)| {
+                format!("  {}. {}", index + 1, render_action_details(action))
+            }),
+        );
+    }
+
+    lines.push("safety:".to_string());
+    if let Some(safety) = &spec.safety {
+        lines.push(format!("  dry_run_first: {}", safety.dry_run_first));
+        lines.push(format!("  undo_log: {}", safety.undo_log));
+    } else {
+        lines.push("  - none".to_string());
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
 fn format_row<'a, I, T>(values: I, widths: &[usize]) -> String
 where
     I: IntoIterator<Item = T>,
@@ -945,6 +1076,21 @@ fn render_action_label(action: &str) -> String {
     }
 
     label
+}
+
+fn render_action_details(action: &Action) -> String {
+    match action {
+        Action::Rename { template } => format!("rename template={template}"),
+        Action::Move { destination } => format!("move destination={destination}"),
+    }
+}
+
+fn render_optional_value(value: &str) -> String {
+    if value.trim().is_empty() {
+        "-".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn approve_suggestion(db_path: &Path) {
