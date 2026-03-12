@@ -9,7 +9,9 @@ use flow_db::repo::{
 use flow_patterns::{
     detect::detect_repeated_patterns, normalize::normalize, sessions::split_into_sessions,
 };
-use intelligence_boundary::{IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient};
+use intelligence_boundary::{
+    IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient, SuggestionDecisionAction,
+};
 use rusqlite::Connection;
 
 /// The open-core analysis layer owns normalization, session building, pattern
@@ -78,7 +80,7 @@ pub fn refresh_analysis_state_with_intelligence(
             .iter()
             .find(|value| value.pattern_signature == pattern.signature)
             .expect("presentation must exist for every detected pattern");
-        if presentation.suppressed {
+        if presentation.action == SuggestionDecisionAction::Suppress {
             suppress_suggestions_for_pattern(&tx, pattern_id, presentation.usefulness_score)
                 .context("failed to suppress suggestion")?;
         } else {

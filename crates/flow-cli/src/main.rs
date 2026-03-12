@@ -2,7 +2,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use flow_analysis::intelligence_boundary::{
-    rank_stored_suggestions, IntelligenceClient, NoopIntelligenceClient,
+    display_stored_suggestions, IntelligenceClient, NoopIntelligenceClient,
 };
 use flow_core::config::Config;
 use flow_db::{
@@ -76,7 +76,7 @@ fn run() -> anyhow::Result<()> {
 
 fn render_suggestions() -> anyhow::Result<()> {
     let conn = open_cli_database()?;
-    let suggestions = ranked_suggestions_for_display(&conn, &NoopIntelligenceClient)?;
+    let suggestions = suggestions_for_display(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -142,7 +142,7 @@ fn render_patterns() -> anyhow::Result<()> {
 
 fn render_suggestions_table() -> anyhow::Result<()> {
     let conn = open_cli_database()?;
-    let suggestions = ranked_suggestions_for_display(&conn, &NoopIntelligenceClient)?;
+    let suggestions = suggestions_for_display(&conn, &NoopIntelligenceClient)?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -370,7 +370,7 @@ fn open_cli_database() -> anyhow::Result<rusqlite::Connection> {
     open_database(&db_path).with_context(|| format!("failed to open database at {db_path}"))
 }
 
-fn ranked_suggestions_for_display(
+fn suggestions_for_display(
     conn: &rusqlite::Connection,
     intelligence_client: &dyn IntelligenceClient,
 ) -> anyhow::Result<Vec<StoredSuggestion>> {
@@ -380,8 +380,8 @@ fn ranked_suggestions_for_display(
         return Ok(suggestions);
     }
 
-    rank_stored_suggestions(&suggestions, intelligence_client)
-        .context("failed to rank suggestions through intelligence boundary")
+    display_stored_suggestions(&suggestions, intelligence_client)
+        .context("failed to evaluate suggestion display through intelligence boundary")
 }
 
 fn should_bypass_intelligence_ranking() -> bool {
@@ -455,8 +455,8 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use flow_analysis::intelligence_boundary::{
-        IntelligenceDisplayDecision, IntelligenceRequest, IntelligenceResponse,
-        SuggestionDecisionAction,
+        display_stored_suggestions, rank_stored_suggestions, IntelligenceDisplayDecision,
+        IntelligenceRequest, IntelligenceResponse, SuggestionDecisionAction,
     };
 
     struct RankingClient;
@@ -538,6 +538,68 @@ mod tests {
         let first = rank_stored_suggestions(&suggestions, &RankingClient).unwrap();
         let second = rank_stored_suggestions(&suggestions, &RankingClient).unwrap();
 
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn display_decisions_can_hide_and_reword_suggestions() {
+        struct DisplayClient;
+
+        impl IntelligenceClient for DisplayClient {
+            fn evaluate(&self, request: &IntelligenceRequest) -> Result<IntelligenceResponse> {
+                Ok(IntelligenceResponse {
+                    decisions: request
+                        .candidates
+                        .iter()
+                        .map(|candidate| IntelligenceDisplayDecision {
+                            pattern_signature: candidate.pattern_signature.clone(),
+                            action: if candidate.pattern_signature.ends_with('a') {
+                                SuggestionDecisionAction::Keep
+                            } else {
+                                SuggestionDecisionAction::Delay
+                            },
+                            proposal_text: Some(format!(
+                                "Display: {}",
+                                candidate.suggestion.baseline_proposal_text
+                            )),
+                            usefulness_score: None,
+                            rank_hint: Some(if candidate.pattern_signature.ends_with('b') {
+                                0
+                            } else {
+                                1
+                            }),
+                        })
+                        .collect(),
+                })
+            }
+        }
+
+        let suggestions = vec![
+            stored_suggestion(1, "CreateFile:invoice-a", 0.9),
+            stored_suggestion(2, "CreateFile:invoice-b", 0.8),
+        ];
+
+        let displayed = display_stored_suggestions(&suggestions, &DisplayClient).unwrap();
+
+        assert_eq!(displayed.len(), 1);
+        assert_eq!(displayed[0].signature, "CreateFile:invoice-a");
+        assert_eq!(
+            displayed[0].proposal_text,
+            "Display: Proposal for CreateFile:invoice-a"
+        );
+    }
+
+    #[test]
+    fn display_fallback_stays_deterministic_without_intelligence() {
+        let suggestions = vec![
+            stored_suggestion(1, "CreateFile:invoice-a", 0.9),
+            stored_suggestion(2, "CreateFile:invoice-b", 0.8),
+        ];
+
+        let first = display_stored_suggestions(&suggestions, &NoopIntelligenceClient).unwrap();
+        let second = display_stored_suggestions(&suggestions, &NoopIntelligenceClient).unwrap();
+
+        assert_eq!(first, suggestions);
         assert_eq!(first, second);
     }
 
