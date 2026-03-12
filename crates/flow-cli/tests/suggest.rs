@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use flow_adapters::file_watcher::FileEvent;
+use flow_analysis::refresh_analysis_state;
 use flow_db::{
     migrations::run_migrations,
     repo::{insert_normalized_event_record, list_suggestions},
@@ -57,6 +58,8 @@ fn seed_database(db_path: &Path) {
     for event in &normalized {
         insert_normalized_event_record(&mut conn, event).unwrap();
     }
+
+    refresh_analysis_state(&mut conn, 300).unwrap();
 }
 
 fn format_duration(duration_ms: i64) -> String {

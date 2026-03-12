@@ -1,5 +1,5 @@
 [package]
-name = "flow-db"
+name = "flow-analysis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,10 +8,12 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 flow-core = { path = "../flow-core" }
+flow-db = { path = "../flow-db" }
+flow-patterns = { path = "../flow-patterns" }
 rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 
 [dev-dependencies]
 flow-adapters = { path = "../flow-adapters" }
-flow-patterns = { path = "../flow-patterns" }
+tempfile.workspace = true

@@ -18,5 +18,6 @@ serde_yaml.workspace = true
 
 [dev-dependencies]
 flow-adapters = { path = "../flow-adapters" }
+flow-analysis = { path = "../flow-analysis" }
 flow-patterns = { path = "../flow-patterns" }
 tempfile.workspace = true

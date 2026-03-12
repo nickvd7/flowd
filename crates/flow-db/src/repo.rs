@@ -1,10 +1,7 @@
 use chrono::{DateTime, Utc};
 use flow_core::events::{ActionType, EventSource, NormalizedEvent, RawEvent};
-use flow_patterns::{detect::detect_repeated_patterns, sessions::split_into_sessions};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-
-const DEFAULT_SESSION_INACTIVITY_SECS: i64 = 300;
 
 pub const AUTOMATION_STATUS_ACTIVE: &str = "active";
 pub const AUTOMATION_STATUS_DISABLED: &str = "disabled";
@@ -139,7 +136,6 @@ pub fn insert_normalized_event_record(
     event: &NormalizedEvent,
 ) -> rusqlite::Result<i64> {
     insert_normalized_event_row(conn, event)?;
-    refresh_analysis_state(conn, DEFAULT_SESSION_INACTIVITY_SECS)?;
     Ok(conn.last_insert_rowid())
 }
 
@@ -168,11 +164,7 @@ pub fn insert_normalized_event_for_raw_event(
     raw_event_id: i64,
     event: &NormalizedEvent,
 ) -> rusqlite::Result<bool> {
-    let inserted = insert_normalized_event_for_raw_event_row(conn, raw_event_id, event)?;
-    if inserted {
-        refresh_analysis_state(conn, DEFAULT_SESSION_INACTIVITY_SECS)?;
-    }
-    Ok(inserted)
+    insert_normalized_event_for_raw_event_row(conn, raw_event_id, event)
 }
 
 pub fn insert_normalized_events_for_raw_events(
@@ -185,10 +177,6 @@ pub fn insert_normalized_events_for_raw_events(
         if insert_normalized_event_for_raw_event_row(conn, *raw_event_id, event)? {
             inserted_count += 1;
         }
-    }
-
-    if inserted_count > 0 {
-        refresh_analysis_state(conn, DEFAULT_SESSION_INACTIVITY_SECS)?;
     }
 
     Ok(inserted_count)
@@ -313,65 +301,9 @@ pub fn clear_analysis_state(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn clear_session_state(conn: &Connection) -> rusqlite::Result<()> {
+pub fn clear_session_state(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM session_events", [])?;
     conn.execute("DELETE FROM sessions", [])?;
-    Ok(())
-}
-
-pub fn refresh_analysis_state(conn: &mut Connection, inactivity_secs: i64) -> rusqlite::Result<()> {
-    let stored_events = list_normalized_events(conn)?;
-    let normalized_events: Vec<_> = stored_events
-        .iter()
-        .map(|stored| stored.event.clone())
-        .collect();
-    let sessions = split_into_sessions(&normalized_events, inactivity_secs);
-    let patterns = detect_repeated_patterns(&sessions);
-    let created_at = Utc::now().to_rfc3339();
-
-    let tx = conn.transaction()?;
-    clear_session_state(&tx)?;
-
-    let mut offset = 0usize;
-    for session in &sessions {
-        let next_offset = offset + session.events.len();
-        let event_ids: Vec<_> = stored_events[offset..next_offset]
-            .iter()
-            .map(|stored| stored.id)
-            .collect();
-        insert_session(
-            &tx,
-            &session.start_ts.to_rfc3339(),
-            &session.end_ts.to_rfc3339(),
-            &event_ids,
-        )?;
-        offset = next_offset;
-    }
-
-    let mut active_pattern_ids = Vec::new();
-    for pattern in patterns {
-        let pattern_id = upsert_pattern(
-            &tx,
-            &pattern.signature,
-            pattern.count,
-            pattern.avg_duration_ms,
-            &pattern.canonical_summary,
-            &pattern.last_seen_at.to_rfc3339(),
-            pattern.safety_score,
-            pattern.usefulness_score,
-        )?;
-        sync_suggestion_for_pattern(
-            &tx,
-            pattern_id,
-            &pattern.proposal_text,
-            &created_at,
-            pattern.usefulness_score,
-        )?;
-        active_pattern_ids.push(pattern_id);
-    }
-
-    mark_stale_patterns_and_suggestions(&tx, &active_pattern_ids)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -400,7 +332,7 @@ pub fn insert_suggestion(
     Ok(conn.last_insert_rowid())
 }
 
-fn upsert_pattern(
+pub fn upsert_pattern(
     conn: &Connection,
     signature: &str,
     count: usize,
@@ -446,7 +378,7 @@ fn upsert_pattern(
     }
 }
 
-fn sync_suggestion_for_pattern(
+pub fn sync_suggestion_for_pattern(
     conn: &Connection,
     pattern_id: i64,
     proposal_text: &str,
@@ -503,7 +435,19 @@ fn sync_suggestion_for_pattern(
     Ok(())
 }
 
-fn mark_stale_patterns_and_suggestions(
+pub fn suppress_suggestions_for_pattern(
+    conn: &Connection,
+    pattern_id: i64,
+    usefulness_score: f64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE suggestions SET freshness = 'stale', usefulness_score = ?2 WHERE pattern_id = ?1 AND status != 'approved'",
+        params![pattern_id, usefulness_score],
+    )?;
+    Ok(())
+}
+
+pub fn mark_stale_patterns_and_suggestions(
     conn: &Connection,
     active_pattern_ids: &[i64],
 ) -> rusqlite::Result<()> {
@@ -1063,182 +1007,6 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&payload_json).unwrap(),
             raw_event.payload
         );
-    }
-
-    #[test]
-    fn stores_and_reads_detected_suggestions() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-
-        let fixture_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/invoice_file_events.json"
-        );
-        let raw_fixture = std::fs::read_to_string(fixture_path).unwrap();
-        let file_events: Vec<FileEvent> = serde_json::from_str(&raw_fixture).unwrap();
-        let raw_events: Vec<_> = file_events
-            .into_iter()
-            .map(FileEvent::into_raw_event)
-            .collect();
-        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
-
-        for event in &normalized {
-            insert_normalized_event_record(&mut conn, event).unwrap();
-        }
-
-        let suggestions = list_suggestions(&conn).unwrap();
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].count, 2);
-        assert!(suggestions[0].proposal_text.contains("invoice"));
-        assert_eq!(suggestions[0].freshness, "current");
-        assert!(suggestions[0].usefulness_score > 0.7);
-    }
-
-    #[test]
-    fn refreshes_suggestions_automatically_without_duplicates() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-
-        let fixture_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/invoice_file_events.json"
-        );
-        let raw_fixture = std::fs::read_to_string(fixture_path).unwrap();
-        let file_events: Vec<FileEvent> = serde_json::from_str(&raw_fixture).unwrap();
-        let raw_events: Vec<_> = file_events
-            .into_iter()
-            .map(FileEvent::into_raw_event)
-            .collect();
-        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
-
-        for event in normalized.iter().take(3) {
-            insert_normalized_event_record(&mut conn, event).unwrap();
-        }
-
-        assert!(list_suggestions(&conn).unwrap().is_empty());
-
-        for event in normalized.iter().skip(3) {
-            insert_normalized_event_record(&mut conn, event).unwrap();
-        }
-
-        let suggestions = list_suggestions(&conn).unwrap();
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].count, 2);
-        assert_eq!(suggestions[0].freshness, "current");
-
-        let pattern_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))
-            .unwrap();
-        let suggestion_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM suggestions", [], |row| row.get(0))
-            .unwrap();
-
-        assert_eq!(pattern_count, 1);
-        assert_eq!(suggestion_count, 1);
-    }
-
-    #[test]
-    fn marks_pending_suggestions_stale_when_patterns_disappear() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-
-        let fixture_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/invoice_file_events.json"
-        );
-        let raw_fixture = std::fs::read_to_string(fixture_path).unwrap();
-        let file_events: Vec<FileEvent> = serde_json::from_str(&raw_fixture).unwrap();
-        let raw_events: Vec<_> = file_events
-            .into_iter()
-            .map(FileEvent::into_raw_event)
-            .collect();
-        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
-
-        for event in &normalized {
-            insert_normalized_event_record(&mut conn, event).unwrap();
-        }
-
-        assert_eq!(list_suggestions(&conn).unwrap().len(), 1);
-
-        conn.execute("DELETE FROM normalized_events", []).unwrap();
-        refresh_analysis_state(&mut conn, DEFAULT_SESSION_INACTIVITY_SECS).unwrap();
-
-        let visible = list_suggestions(&conn).unwrap();
-        assert!(visible.is_empty());
-
-        let (freshness, status): (String, String) = conn
-            .query_row(
-                "SELECT freshness, status FROM suggestions ORDER BY id ASC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        let is_active: i64 = conn
-            .query_row(
-                "SELECT is_active FROM patterns ORDER BY id ASC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(freshness, "stale");
-        assert_eq!(status, "pending");
-        assert_eq!(is_active, 0);
-    }
-
-    #[test]
-    fn preserves_approved_suggestions_and_automations_during_refresh() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-
-        let fixture_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/invoice_file_events.json"
-        );
-        let raw_fixture = std::fs::read_to_string(fixture_path).unwrap();
-        let file_events: Vec<FileEvent> = serde_json::from_str(&raw_fixture).unwrap();
-        let raw_events: Vec<_> = file_events
-            .into_iter()
-            .map(FileEvent::into_raw_event)
-            .collect();
-        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
-
-        for event in &normalized {
-            insert_normalized_event_record(&mut conn, event).unwrap();
-        }
-
-        let suggestions = list_suggestions(&conn).unwrap();
-        assert_eq!(suggestions.len(), 1);
-        let suggestion = &suggestions[0];
-        set_suggestion_status(&conn, suggestion.suggestion_id, "approved").unwrap();
-        insert_automation(
-            &conn,
-            suggestion.suggestion_id,
-            "id: test\ntrigger: {}\nactions: []\n",
-            AUTOMATION_STATUS_ACTIVE,
-            &suggestion.proposal_text,
-            "2026-01-15T10:00:00Z",
-        )
-        .unwrap();
-
-        conn.execute("DELETE FROM normalized_events", []).unwrap();
-        refresh_analysis_state(&mut conn, DEFAULT_SESSION_INACTIVITY_SECS).unwrap();
-
-        let suggestion_row: (String, String) = conn
-            .query_row(
-                "SELECT status, freshness FROM suggestions WHERE id = ?1",
-                [suggestion.suggestion_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        let automation_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM automations", [], |row| row.get(0))
-            .unwrap();
-
-        assert_eq!(suggestion_row.0, "approved");
-        assert_eq!(suggestion_row.1, "current");
-        assert_eq!(automation_count, 1);
-        assert!(list_suggestions(&conn).unwrap().is_empty());
     }
 
     #[test]

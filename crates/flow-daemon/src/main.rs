@@ -1,9 +1,9 @@
-mod analysis;
 mod observation;
 
 use anyhow::{Context, Result};
 use chrono::Duration;
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
+use flow_analysis::catch_up_analysis;
 use flow_core::config::Config;
 use flow_db::open_database as open_sqlite_database;
 use observation::ObservationPipeline;
@@ -28,7 +28,7 @@ fn run() -> Result<()> {
     let observed_paths = resolve_observed_paths(&config)?;
     let mut conn = open_database(&config).context("failed to initialize daemon database")?;
 
-    analysis::catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
+    catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
         .context("failed to catch up analysis state")?;
 
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
@@ -52,7 +52,7 @@ fn run() -> Result<()> {
                         continue;
                     };
 
-                    analysis::catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
+                    catch_up_analysis(&mut conn, SESSION_INACTIVITY_SECS)
                         .context("failed during analysis refresh")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
@@ -204,8 +204,8 @@ mod tests {
         );
 
         flow_db::repo::insert_raw_event(&conn, &raw_event).unwrap();
-        analysis::normalize_pending_raw_events(&mut conn).unwrap();
-        analysis::normalize_pending_raw_events(&mut conn).unwrap();
+        flow_analysis::normalize_pending_raw_events(&mut conn).unwrap();
+        flow_analysis::normalize_pending_raw_events(&mut conn).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM normalized_events", [], |row| {
@@ -300,9 +300,9 @@ mod tests {
             flow_db::repo::insert_raw_event(&conn, &event).unwrap();
         }
 
-        analysis::normalize_pending_raw_events(&mut conn).unwrap();
-        analysis::rebuild_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
-        analysis::rebuild_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
+        flow_analysis::normalize_pending_raw_events(&mut conn).unwrap();
+        flow_analysis::refresh_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
+        flow_analysis::refresh_analysis_state(&mut conn, SESSION_INACTIVITY_SECS).unwrap();
 
         let pattern_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM patterns", [], |row| row.get(0))

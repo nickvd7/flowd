@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use flow_adapters::file_watcher::FileEvent;
+use flow_analysis::refresh_analysis_state;
 use flow_db::{
     migrations::run_migrations,
     repo::{
         insert_normalized_event_record, insert_raw_event, list_automations, list_normalized_events,
         list_patterns, list_pending_file_raw_events, list_recent_sessions, list_suggestions,
-        refresh_analysis_state,
     },
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
@@ -701,6 +701,8 @@ fn seed_database(db_path: &Path) {
     for event in &normalized {
         insert_normalized_event_record(&mut conn, event).unwrap();
     }
+
+    refresh_analysis_state(&mut conn, 300).unwrap();
 }
 
 fn seed_database_from_observed_events(db_path: &Path) {
