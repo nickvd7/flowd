@@ -9,11 +9,12 @@ use flow_core::config::Config;
 use flow_db::{
     open_database,
     repo::{
-        get_suggestion, increment_rejected, increment_shown, increment_snoozed, list_automations,
-        list_patterns, list_recent_sessions, list_suggestions, set_suggestion_status,
-        StoredSuggestion,
+        get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
+        list_automations, list_patterns, list_recent_sessions, list_suggestions,
+        set_suggestion_status, StoredSuggestion,
     },
 };
+use flow_dsl::{Action, AutomationSpec};
 use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
     execute_automation, list_runs, undo_automation_run,
@@ -53,7 +54,10 @@ enum Commands {
     Snooze {
         suggestion_id: i64,
     },
-    Automations,
+    Automations {
+        #[command(subcommand)]
+        command: Option<AutomationsCommand>,
+    },
     Disable {
         automation_id: i64,
     },
@@ -75,6 +79,11 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum SuggestionsCommand {
     Explain { suggestion_id: i64 },
+}
+
+#[derive(Debug, Subcommand)]
+enum AutomationsCommand {
+    Show { automation_id: i64 },
 }
 
 fn main() {
@@ -102,7 +111,12 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Approve { suggestion_id }) => approve_automation_command(suggestion_id)?,
         Some(Commands::Reject { suggestion_id }) => reject_suggestion_command(suggestion_id)?,
         Some(Commands::Snooze { suggestion_id }) => snooze_suggestion_command(suggestion_id)?,
-        Some(Commands::Automations) => render_automations()?,
+        Some(Commands::Automations { command }) => match command {
+            Some(AutomationsCommand::Show { automation_id }) => {
+                show_automation_command(automation_id)?
+            }
+            None => render_automations()?,
+        },
         Some(Commands::Disable { automation_id }) => disable_automation_command(automation_id)?,
         Some(Commands::Enable { automation_id }) => enable_automation_command(automation_id)?,
         Some(Commands::Run { automation_id }) => run_automation_command(automation_id)?,
@@ -312,6 +326,20 @@ fn render_automations() -> anyhow::Result<()> {
         ],
         &rows,
     );
+    Ok(())
+}
+
+fn show_automation_command(automation_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database()?;
+    let automation = get_automation(&conn, automation_id)
+        .context("failed to read automation")?
+        .ok_or_else(|| anyhow::anyhow!("automation {automation_id} not found"))?;
+    let spec = flow_dsl::parse_spec(&automation.spec_yaml).context("failed to parse automation")?;
+
+    for line in render_automation_report(&automation, &spec) {
+        println!("{line}");
+    }
+
     Ok(())
 }
 
@@ -1182,6 +1210,83 @@ fn summarize_run_operations(payload: Option<&str>) -> usize {
                 .map(|operations| operations.len())
         })
         .unwrap_or(0)
+}
+
+fn render_automation_report(
+    automation: &flow_db::repo::StoredAutomationSpec,
+    spec: &AutomationSpec,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("automation: {}", automation.automation_id),
+        format!("spec_id: {}", spec.id),
+        format!("title: {}", render_optional_value(&automation.summary)),
+        format!("status: {}", automation.status),
+        format!(
+            "suggestion: {}",
+            automation
+                .suggestion_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        format!(
+            "accepted: {}",
+            automation
+                .accepted_at
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        "trigger:".to_string(),
+        format!("  type: {}", spec.trigger.r#type),
+        format!(
+            "  path: {}",
+            render_optional_value(spec.trigger.path.as_deref().unwrap_or(""))
+        ),
+        format!(
+            "  extension: {}",
+            render_optional_value(spec.trigger.extension.as_deref().unwrap_or(""))
+        ),
+        format!(
+            "  name_contains: {}",
+            render_optional_value(spec.trigger.name_contains.as_deref().unwrap_or(""))
+        ),
+        "actions:".to_string(),
+    ];
+
+    if spec.actions.is_empty() {
+        lines.push("  - none".to_string());
+    } else {
+        lines.extend(
+            spec.actions.iter().enumerate().map(|(index, action)| {
+                format!("  {}. {}", index + 1, render_action_details(action))
+            }),
+        );
+    }
+
+    lines.push("safety:".to_string());
+    if let Some(safety) = &spec.safety {
+        lines.push(format!("  dry_run_first: {}", safety.dry_run_first));
+        lines.push(format!("  undo_log: {}", safety.undo_log));
+    } else {
+        lines.push("  - none".to_string());
+    }
+
+    lines
+}
+
+fn render_action_details(action: &Action) -> String {
+    match action {
+        Action::Rename { template } => format!("rename template={template}"),
+        Action::Move { destination } => format!("move destination={destination}"),
+    }
+}
+
+fn render_optional_value(value: &str) -> String {
+    if value.trim().is_empty() {
+        "-".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
