@@ -3,7 +3,7 @@ pub mod intelligence_boundary;
 use anyhow::{Context, Result};
 use flow_db::repo::{
     clear_session_state, insert_normalized_events_for_raw_events, insert_session,
-    list_normalized_events, list_pending_file_raw_events, list_suggestion_histories,
+    list_normalized_events, list_pending_observation_raw_events, list_suggestion_histories,
     mark_stale_patterns_and_suggestions, suppress_suggestions_for_pattern,
     sync_suggestion_for_pattern, upsert_pattern,
 };
@@ -116,8 +116,8 @@ pub fn refresh_analysis_state_with_intelligence(
 pub fn normalize_pending_raw_events(conn: &mut Connection) -> Result<()> {
     let mut normalized_events = Vec::new();
 
-    for raw_event in
-        list_pending_file_raw_events(conn).context("failed to load pending raw file events")?
+    for raw_event in list_pending_observation_raw_events(conn)
+        .context("failed to load pending observation raw events")?
     {
         let Some(normalized_event) = normalize(&raw_event.event) else {
             continue;
@@ -147,14 +147,18 @@ mod tests {
         SuggestionDecisionAction,
     };
     use chrono::Utc;
-    use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
+    use flow_adapters::{
+        file_watcher::{synthetic_file_event, FileEvent, FileEventKind},
+        terminal::synthetic_terminal_history_event,
+    };
     use flow_db::{
         migrations::run_migrations,
         repo::{
             get_suggestion, increment_accepted, increment_rejected, increment_shown,
             increment_snoozed, insert_automation, insert_normalized_event_record, insert_raw_event,
             list_automations, list_normalized_events, list_patterns, list_pending_file_raw_events,
-            list_suggestions, set_suggestion_status, AUTOMATION_STATUS_ACTIVE,
+            list_pending_observation_raw_events, list_suggestions, set_suggestion_status,
+            AUTOMATION_STATUS_ACTIVE,
         },
     };
     use std::cell::RefCell;
@@ -407,5 +411,53 @@ mod tests {
         assert_eq!(list_normalized_events(&conn).unwrap().len(), 6);
         assert_eq!(list_patterns(&conn).unwrap().len(), 1);
         assert_eq!(list_suggestions(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn catch_up_analysis_ingests_terminal_history_signals() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        for raw_event in [
+            synthetic_terminal_history_event(
+                Utc::now(),
+                "/tmp/workspace",
+                "cp inbox/invoice-1.pdf review/invoice-1.pdf",
+                Some(0),
+            ),
+            synthetic_terminal_history_event(
+                Utc::now() + chrono::Duration::seconds(10),
+                "/tmp/workspace",
+                "mv review/invoice-1.pdf archive/invoice-1.pdf",
+                Some(0),
+            ),
+            synthetic_terminal_history_event(
+                Utc::now() + chrono::Duration::hours(1),
+                "/tmp/workspace",
+                "cp inbox/invoice-2.pdf review/invoice-2.pdf",
+                Some(0),
+            ),
+            synthetic_terminal_history_event(
+                Utc::now() + chrono::Duration::hours(1) + chrono::Duration::seconds(10),
+                "/tmp/workspace",
+                "mv review/invoice-2.pdf archive/invoice-2.pdf",
+                Some(0),
+            ),
+        ] {
+            insert_raw_event(&conn, &raw_event).unwrap();
+        }
+
+        assert_eq!(list_pending_observation_raw_events(&conn).unwrap().len(), 4);
+        catch_up_analysis(&mut conn, 300).unwrap();
+
+        let normalized = list_normalized_events(&conn).unwrap();
+        assert_eq!(normalized.len(), 4);
+        assert!(normalized
+            .iter()
+            .any(|event| event.event.action_type == flow_core::events::ActionType::CreateFile));
+        assert!(normalized
+            .iter()
+            .any(|event| event.event.action_type == flow_core::events::ActionType::MoveFile));
+        assert_eq!(list_patterns(&conn).unwrap().len(), 1);
     }
 }

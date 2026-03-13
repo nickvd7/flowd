@@ -275,6 +275,54 @@ pub fn list_pending_file_raw_events(conn: &Connection) -> rusqlite::Result<Vec<S
     rows.collect()
 }
 
+pub fn list_pending_observation_raw_events(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<StoredRawEvent>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT raw_events.id, raw_events.ts, raw_events.source, raw_events.payload_json
+        FROM raw_events
+        LEFT JOIN normalized_events ON normalized_events.raw_event_id = raw_events.id
+        WHERE normalized_events.raw_event_id IS NULL
+            AND (
+                (
+                    raw_events.source = ?1
+                    AND (
+                        raw_events.payload_json LIKE '%"kind":"create"%'
+                        OR raw_events.payload_json LIKE '%"kind":"rename"%'
+                        OR raw_events.payload_json LIKE '%"kind":"move"%'
+                    )
+                )
+                OR raw_events.source = ?2
+            )
+        ORDER BY raw_events.id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map(
+        [
+            format!("{:?}", EventSource::FileWatcher),
+            format!("{:?}", EventSource::Terminal),
+        ],
+        |row| {
+            let ts: String = row.get(1)?;
+            let source: String = row.get(2)?;
+            let payload_json: String = row.get(3)?;
+
+            Ok(StoredRawEvent {
+                id: row.get(0)?,
+                event: RawEvent {
+                    ts: parse_timestamp(&ts)?,
+                    source: parse_event_source(&source)?,
+                    payload: parse_json_value(&payload_json)?,
+                },
+            })
+        },
+    )?;
+
+    rows.collect()
+}
+
 pub fn list_normalized_events(conn: &Connection) -> rusqlite::Result<Vec<StoredNormalizedEvent>> {
     let mut statement = conn.prepare(
         r#"
@@ -1287,6 +1335,7 @@ mod tests {
     use crate::migrations::run_migrations;
     use chrono::Utc;
     use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
+    use flow_adapters::terminal::synthetic_terminal_history_event;
     use flow_core::events::EventSource;
     use flow_patterns::normalize::normalize;
     use tempfile::tempdir;
@@ -1374,6 +1423,34 @@ mod tests {
         assert_eq!(pending[0].event.ts, pending_raw.ts);
         assert_eq!(pending[0].event.source, pending_raw.source);
         assert_eq!(pending[0].event.payload, pending_raw.payload);
+    }
+
+    #[test]
+    fn lists_pending_terminal_observation_events_without_normalized_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let terminal_raw = synthetic_terminal_history_event(
+            Utc::now(),
+            "/tmp/workspace",
+            "mv inbox/report.txt archive/report.txt",
+            Some(0),
+        );
+        insert_raw_event(&conn, &terminal_raw).unwrap();
+
+        let pending = list_pending_observation_raw_events(&conn).unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event.source, EventSource::Terminal);
+        assert_eq!(pending[0].event.payload, terminal_raw.payload);
+
+        let normalized = normalize(&terminal_raw).unwrap();
+        let terminal_raw_id = conn.last_insert_rowid();
+        insert_normalized_event_for_raw_event(&mut conn, terminal_raw_id, &normalized).unwrap();
+
+        assert!(list_pending_observation_raw_events(&conn)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
