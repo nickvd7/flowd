@@ -164,14 +164,34 @@ fn event_signature_part(event: &flow_core::events::NormalizedEvent) -> String {
         .get("file_group")
         .and_then(|value| value.as_str())
         .unwrap_or("file");
-    format!("{:?}:{group}", event.action_type)
+    let sequence_pattern = event
+        .metadata
+        .get("command_sequence_pattern")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty());
+
+    match sequence_pattern {
+        Some(pattern) => format!("{:?}:{group}:{pattern}", event.action_type),
+        None => format!("{:?}:{group}", event.action_type),
+    }
 }
 
 fn session_summary(session: &EventSession) -> String {
     session
         .events
         .iter()
-        .map(|event| format!("{:?}", event.action_type))
+        .map(|event| {
+            let sequence_pattern = event
+                .metadata
+                .get("command_sequence_pattern")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty());
+
+            match sequence_pattern {
+                Some(pattern) => format!("{:?} ({pattern})", event.action_type),
+                None => format!("{:?}", event.action_type),
+            }
+        })
         .collect::<Vec<_>>()
         .join(" -> ")
 }
@@ -190,7 +210,10 @@ mod tests {
     use super::*;
     use crate::{normalize::normalize, sessions::split_into_sessions};
     use chrono::{TimeZone, Utc};
-    use flow_adapters::file_watcher::{synthetic_file_event, FileEventKind};
+    use flow_adapters::{
+        file_watcher::{synthetic_file_event, FileEventKind},
+        terminal::synthetic_terminal_history_event,
+    };
 
     #[test]
     fn detects_repeated_invoice_pattern() {
@@ -313,5 +336,32 @@ mod tests {
         assert!(patterns[0].usefulness_score > patterns[1].usefulness_score);
         assert!(patterns[0].proposal_text.contains("invoice"));
         assert!(patterns[1].proposal_text.contains("report"));
+    }
+
+    #[test]
+    fn detects_repeated_terminal_directory_preparation_flows() {
+        let raw_events = vec![
+            synthetic_terminal_history_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 9, 0, 0).unwrap(),
+                "/tmp/workspace",
+                "mkdir -p review/2026/03 && cp inbox/report-1001.txt review/2026/03/report-1001.txt",
+                Some(0),
+            ),
+            synthetic_terminal_history_event(
+                Utc.with_ymd_and_hms(2026, 3, 11, 10, 0, 0).unwrap(),
+                "/tmp/workspace",
+                "mkdir -p review/2026/03 && cp inbox/report-1002.txt review/2026/03/report-1002.txt",
+                Some(0),
+            ),
+        ];
+
+        let normalized: Vec<_> = raw_events.iter().filter_map(normalize).collect();
+        let sessions = split_into_sessions(&normalized, 300);
+        let patterns = detect_repeated_patterns(&sessions);
+
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].count, 2);
+        assert_eq!(patterns[0].signature, "CreateFile:report:mkdir>copy");
+        assert!(patterns[0].canonical_summary.contains("mkdir>copy"));
     }
 }

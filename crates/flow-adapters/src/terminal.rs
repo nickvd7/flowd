@@ -75,6 +75,12 @@ pub fn record_to_raw_event(
             "from_path": signal.from_path,
             "paths": signal.paths,
             "path_count": signal.path_count,
+            "source_paths": signal.source_paths,
+            "target_paths": signal.target_paths,
+            "command_kinds": signal.command_kinds,
+            "command_sequence_pattern": signal.command_sequence_pattern,
+            "directory_structures": signal.directory_structures,
+            "command_count": signal.command_count,
             "destructive": matches!(signal.kind, TerminalCommandKind::Remove),
         }),
     })
@@ -102,36 +108,110 @@ struct TerminalSignal {
     from_path: Option<String>,
     paths: Vec<String>,
     path_count: usize,
+    source_paths: Vec<String>,
+    target_paths: Vec<String>,
+    command_kinds: Vec<String>,
+    command_sequence_pattern: String,
+    directory_structures: Vec<String>,
+    command_count: usize,
 }
 
 fn classify_command(record: &TerminalHistoryRecord, tokens: &[String]) -> TerminalSignal {
-    let command_name = tokens[0].as_str();
-    let args = &tokens[1..];
+    let segments = split_command_segments(&record.command)
+        .ok()
+        .filter(|segments| !segments.is_empty())
+        .unwrap_or_else(|| vec![record.command.clone()]);
+    let mut classified_segments = Vec::with_capacity(segments.len());
+
+    for segment in segments {
+        let segment_tokens = tokenize_command_line(&segment).unwrap_or_else(|_| tokens.to_vec());
+        classified_segments.push(classify_command_segment(&record.cwd, &segment_tokens));
+    }
+
+    aggregate_segment_signals(classified_segments)
+}
+
+#[derive(Debug, Clone)]
+struct CommandSegmentSignal {
+    kind: TerminalCommandKind,
+    path: Option<String>,
+    from_path: Option<String>,
+    paths: Vec<String>,
+    source_paths: Vec<String>,
+    target_paths: Vec<String>,
+}
+
+fn classify_command_segment(cwd: &str, tokens: &[String]) -> CommandSegmentSignal {
+    let command_name = tokens.first().map(|value| value.as_str()).unwrap_or("command");
+    let args = if tokens.is_empty() { &[][..] } else { &tokens[1..] };
     let path_args = collect_path_args(command_name, args);
 
     match command_name {
-        "mv" => classify_move_command(&record.cwd, &path_args),
-        "cp" => classify_copy_command(&record.cwd, &path_args),
-        "mkdir" => classify_mkdir_command(&record.cwd, &path_args),
-        "rm" => classify_remove_command(&record.cwd, &path_args),
-        _ => TerminalSignal {
+        "mv" => classify_move_command(cwd, &path_args),
+        "cp" => classify_copy_command(cwd, &path_args),
+        "mkdir" => classify_mkdir_command(cwd, &path_args),
+        "rm" => classify_remove_command(cwd, &path_args),
+        _ => CommandSegmentSignal {
             kind: TerminalCommandKind::Command,
             path: None,
             from_path: None,
-            path_count: 0,
             paths: Vec::new(),
+            source_paths: Vec::new(),
+            target_paths: Vec::new(),
         },
     }
 }
 
-fn classify_move_command(cwd: &str, path_args: &[String]) -> TerminalSignal {
+fn aggregate_segment_signals(segments: Vec<CommandSegmentSignal>) -> TerminalSignal {
+    let mut paths = Vec::new();
+    let mut source_paths = Vec::new();
+    let mut target_paths = Vec::new();
+    let mut command_kinds = Vec::with_capacity(segments.len());
+    let mut directory_structures = Vec::new();
+
+    for segment in &segments {
+        command_kinds.push(command_kind_name(&segment.kind).to_string());
+        extend_unique(&mut paths, segment.paths.iter().cloned());
+        extend_unique(&mut source_paths, segment.source_paths.iter().cloned());
+        extend_unique(&mut target_paths, segment.target_paths.iter().cloned());
+    }
+
+    for path in source_paths.iter().chain(target_paths.iter()).chain(paths.iter()) {
+        push_unique(&mut directory_structures, directory_structure(path));
+    }
+
+    let primary = segments
+        .iter()
+        .rev()
+        .find(|segment| segment.kind != TerminalCommandKind::Command)
+        .or_else(|| segments.last());
+
+    TerminalSignal {
+        kind: primary
+            .map(|segment| segment.kind.clone())
+            .unwrap_or(TerminalCommandKind::Command),
+        path: primary.and_then(|segment| segment.path.clone()),
+        from_path: primary.and_then(|segment| segment.from_path.clone()),
+        path_count: paths.len(),
+        paths,
+        source_paths,
+        target_paths,
+        command_sequence_pattern: command_kinds.join(">"),
+        command_kinds,
+        directory_structures,
+        command_count: segments.len(),
+    }
+}
+
+fn classify_move_command(cwd: &str, path_args: &[String]) -> CommandSegmentSignal {
     if path_args.len() != 2 {
-        return TerminalSignal {
+        return CommandSegmentSignal {
             kind: TerminalCommandKind::Command,
             path: None,
             from_path: None,
             paths: Vec::new(),
-            path_count: 0,
+            source_paths: Vec::new(),
+            target_paths: Vec::new(),
         };
     }
 
@@ -143,56 +223,61 @@ fn classify_move_command(cwd: &str, path_args: &[String]) -> TerminalSignal {
         TerminalCommandKind::Move
     };
 
-    TerminalSignal {
+    CommandSegmentSignal {
         kind,
         path: Some(to_path.clone()),
         from_path: Some(from_path.clone()),
-        paths: vec![from_path, to_path],
-        path_count: 2,
+        paths: vec![from_path.clone(), to_path.clone()],
+        source_paths: vec![from_path],
+        target_paths: vec![to_path],
     }
 }
 
-fn classify_copy_command(cwd: &str, path_args: &[String]) -> TerminalSignal {
+fn classify_copy_command(cwd: &str, path_args: &[String]) -> CommandSegmentSignal {
     if path_args.len() != 2 {
-        return TerminalSignal {
+        return CommandSegmentSignal {
             kind: TerminalCommandKind::Command,
             path: None,
             from_path: None,
             paths: Vec::new(),
-            path_count: 0,
+            source_paths: Vec::new(),
+            target_paths: Vec::new(),
         };
     }
 
     let from_path = resolve_path(cwd, &path_args[0]);
     let to_path = resolve_path(cwd, &path_args[1]);
 
-    TerminalSignal {
+    CommandSegmentSignal {
         kind: TerminalCommandKind::Copy,
         path: Some(to_path.clone()),
         from_path: Some(from_path.clone()),
-        paths: vec![from_path, to_path],
-        path_count: 2,
+        paths: vec![from_path.clone(), to_path.clone()],
+        source_paths: vec![from_path],
+        target_paths: vec![to_path],
     }
 }
 
-fn classify_mkdir_command(cwd: &str, path_args: &[String]) -> TerminalSignal {
+fn classify_mkdir_command(cwd: &str, path_args: &[String]) -> CommandSegmentSignal {
     let paths: Vec<_> = path_args.iter().map(|arg| resolve_path(cwd, arg)).collect();
-    TerminalSignal {
+    CommandSegmentSignal {
         kind: TerminalCommandKind::Mkdir,
         path: paths.first().cloned(),
         from_path: None,
-        path_count: paths.len(),
+        source_paths: Vec::new(),
+        target_paths: paths.clone(),
         paths,
     }
 }
 
-fn classify_remove_command(cwd: &str, path_args: &[String]) -> TerminalSignal {
+fn classify_remove_command(cwd: &str, path_args: &[String]) -> CommandSegmentSignal {
     let paths: Vec<_> = path_args.iter().map(|arg| resolve_path(cwd, arg)).collect();
-    TerminalSignal {
+    CommandSegmentSignal {
         kind: TerminalCommandKind::Remove,
         path: paths.first().cloned(),
         from_path: None,
-        path_count: paths.len(),
+        source_paths: paths.clone(),
+        target_paths: Vec::new(),
         paths,
     }
 }
@@ -246,6 +331,137 @@ fn redact_tokens(tokens: &[String]) -> String {
     }
 
     redacted.join(" ")
+}
+
+fn split_command_segments(command: &str) -> Result<Vec<String>, TerminalHistoryError> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(active_quote) => {
+                if ch == active_quote {
+                    quote = None;
+                } else if ch == '\\' && active_quote == '"' {
+                    let escaped = chars.next().ok_or_else(|| {
+                        TerminalHistoryError::InvalidCommand(
+                            "unfinished escape sequence".to_string(),
+                        )
+                    })?;
+                    current.push(ch);
+                    current.push(escaped);
+                } else {
+                    current.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    current.push(ch);
+                }
+                '\\' => {
+                    let escaped = chars.next().ok_or_else(|| {
+                        TerminalHistoryError::InvalidCommand(
+                            "unfinished escape sequence".to_string(),
+                        )
+                    })?;
+                    current.push(ch);
+                    current.push(escaped);
+                }
+                ';' => {
+                    push_segment(&mut segments, &mut current);
+                }
+                '&' | '|' => {
+                    if chars.peek() == Some(&ch) {
+                        chars.next();
+                        push_segment(&mut segments, &mut current);
+                    } else {
+                        current.push(ch);
+                    }
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+
+    if quote.is_some() {
+        return Err(TerminalHistoryError::InvalidCommand(
+            "unterminated quoted string".to_string(),
+        ));
+    }
+
+    push_segment(&mut segments, &mut current);
+    if segments.is_empty() {
+        return Err(TerminalHistoryError::InvalidCommand(
+            "empty command".to_string(),
+        ));
+    }
+    Ok(segments)
+}
+
+fn push_segment(segments: &mut Vec<String>, current: &mut String) {
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        segments.push(trimmed.to_string());
+    }
+    current.clear();
+}
+
+fn command_kind_name(kind: &TerminalCommandKind) -> &'static str {
+    match kind {
+        TerminalCommandKind::Command => "command",
+        TerminalCommandKind::Copy => "copy",
+        TerminalCommandKind::Mkdir => "mkdir",
+        TerminalCommandKind::Move => "move",
+        TerminalCommandKind::Remove => "remove",
+        TerminalCommandKind::Rename => "rename",
+    }
+}
+
+fn extend_unique(values: &mut Vec<String>, iter: impl IntoIterator<Item = String>) {
+    for value in iter {
+        push_unique(values, value);
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn directory_structure(path: &str) -> String {
+    let Some(parent) = Path::new(path).parent() else {
+        return ".".to_string();
+    };
+    let mut components = Vec::new();
+    for component in parent.components() {
+        if let Component::Normal(value) = component {
+            components.push(normalize_structure_component(&value.to_string_lossy()));
+        }
+    }
+
+    if components.is_empty() {
+        ".".to_string()
+    } else {
+        components.join("/")
+    }
+}
+
+fn normalize_structure_component(component: &str) -> String {
+    let lowered = component.to_ascii_lowercase();
+    if lowered.chars().all(|ch| ch.is_ascii_digit()) {
+        "#".to_string()
+    } else if lowered
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        lowered
+    } else {
+        "*".to_string()
+    }
 }
 
 fn is_sensitive_assignment(token: &str) -> bool {
@@ -458,5 +674,45 @@ mod tests {
         assert_eq!(raw.payload["destructive"], true);
         assert_eq!(raw.payload["path_count"], 2);
         assert_eq!(raw.payload["redacted_command"], "rm -rf <path> <path>");
+    }
+
+    #[test]
+    fn captures_chained_directory_preparation_and_copy_workflow() {
+        let raw = record_to_raw_event(&sample_record(
+            "mkdir -p review/2026/03 && cp inbox/report.txt review/2026/03/report.txt",
+        ))
+        .unwrap();
+
+        assert_eq!(raw.payload["kind"], "copy");
+        assert_eq!(raw.payload["command_sequence_pattern"], "mkdir>copy");
+        assert_eq!(raw.payload["command_count"], 2);
+        assert_eq!(raw.payload["source_paths"][0], "/tmp/workspace/inbox/report.txt");
+        assert_eq!(
+            raw.payload["target_paths"][0],
+            "/tmp/workspace/review/2026/03"
+        );
+        assert_eq!(
+            raw.payload["target_paths"][1],
+            "/tmp/workspace/review/2026/03/report.txt"
+        );
+        assert!(raw.payload["directory_structures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("tmp/workspace/review/#/#")));
+    }
+
+    #[test]
+    fn keeps_chained_move_sequences_stable_for_pattern_detection() {
+        let raw = record_to_raw_event(&sample_record(
+            "mkdir -p archive/reports; mv inbox/draft.txt archive/reports/report.txt",
+        ))
+        .unwrap();
+
+        assert_eq!(raw.payload["kind"], "move");
+        assert_eq!(raw.payload["command_sequence_pattern"], "mkdir>move");
+        assert_eq!(raw.payload["command_kinds"], serde_json::json!(["mkdir", "move"]));
+        assert_eq!(raw.payload["path"], "/tmp/workspace/archive/reports/report.txt");
+        assert_eq!(raw.payload["from_path"], "/tmp/workspace/inbox/draft.txt");
     }
 }

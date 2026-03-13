@@ -202,10 +202,25 @@ fn normalize_terminal_event(raw: &RawEvent) -> Option<NormalizedEvent> {
         .unwrap_or("command");
     let metadata = json!({
         "kind": kind,
+        "command_kind": kind,
         "path": path,
         "from_path": from_path,
         "paths": raw.payload.get("paths").cloned().unwrap_or_default(),
         "path_count": raw.payload.get("path_count").cloned().unwrap_or_default(),
+        "source_paths": raw.payload.get("source_paths").cloned().unwrap_or_default(),
+        "target_paths": raw.payload.get("target_paths").cloned().unwrap_or_default(),
+        "command_kinds": raw.payload.get("command_kinds").cloned().unwrap_or_default(),
+        "command_sequence_pattern": raw
+            .payload
+            .get("command_sequence_pattern")
+            .cloned()
+            .unwrap_or_default(),
+        "command_count": raw.payload.get("command_count").cloned().unwrap_or_default(),
+        "directory_structures": raw
+            .payload
+            .get("directory_structures")
+            .cloned()
+            .unwrap_or_default(),
         "command_name": command_name,
         "cwd": raw.payload.get("cwd").cloned().unwrap_or_default(),
         "shell": raw.payload.get("shell").cloned().unwrap_or_default(),
@@ -333,6 +348,7 @@ mod tests {
         assert_eq!(event.app.as_deref(), Some("terminal"));
         assert_eq!(event.metadata["source"], "terminal");
         assert_eq!(event.metadata["command_name"], "mv");
+        assert_eq!(event.metadata["command_kind"], "move");
         assert_eq!(event.metadata["file_group"], "report");
     }
 
@@ -352,6 +368,32 @@ mod tests {
         assert_eq!(event.metadata["destructive"], true);
         assert_eq!(event.metadata["command_name"], "rm");
         assert_eq!(event.metadata["file_group"], "secrets");
+    }
+
+    #[test]
+    fn normalizes_chained_terminal_directory_prep_workflows_with_sequence_metadata() {
+        let raw = synthetic_terminal_history_event(
+            Utc.with_ymd_and_hms(2026, 3, 11, 9, 10, 0).unwrap(),
+            "/tmp/workspace",
+            "mkdir -p review/2026/03 && cp inbox/report.txt review/2026/03/report.txt",
+            Some(0),
+        );
+
+        let event = normalize(&raw).unwrap();
+
+        assert_eq!(event.action_type, ActionType::CreateFile);
+        assert_eq!(
+            event.target.as_deref(),
+            Some("/tmp/workspace/review/2026/03/report.txt")
+        );
+        assert_eq!(event.metadata["command_sequence_pattern"], "mkdir>copy");
+        assert_eq!(event.metadata["command_count"], 2);
+        assert_eq!(event.metadata["target_paths"][0], "/tmp/workspace/review/2026/03");
+        assert!(event.metadata["directory_structures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("tmp/workspace/review/#/#")));
     }
 
     #[test]
