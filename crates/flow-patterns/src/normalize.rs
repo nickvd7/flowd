@@ -87,7 +87,10 @@ fn normalize_browser_event(raw: &RawEvent) -> Option<NormalizedEvent> {
             metadata: raw.payload.clone(),
         }),
         "download" => {
-            let filename = raw.payload.get("filename").and_then(|value| value.as_str())?;
+            let filename = raw
+                .payload
+                .get("filename")
+                .and_then(|value| value.as_str())?;
             let path = raw.payload.get("path").and_then(|value| value.as_str());
             let app = raw
                 .payload

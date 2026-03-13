@@ -1,0 +1,90 @@
+[
+  {
+    "ts": "2026-03-13T15:00:00Z",
+    "source": "Terminal",
+    "payload": {
+      "kind": "rename",
+      "command_name": "mv",
+      "cwd": "/demo/workspace",
+      "exit_code": 0,
+      "shell": "zsh",
+      "arg_count": 2,
+      "succeeded": true,
+      "redacted_command": "mv <path> <path>",
+      "path": "/demo/workspace/inbox/project-brief-reviewed-01.md",
+      "from_path": "/demo/workspace/inbox/project-brief-01.md",
+      "paths": [
+        "/demo/workspace/inbox/project-brief-01.md",
+        "/demo/workspace/inbox/project-brief-reviewed-01.md"
+      ],
+      "path_count": 2,
+      "destructive": false
+    }
+  },
+  {
+    "ts": "2026-03-13T15:00:20Z",
+    "source": "Terminal",
+    "payload": {
+      "kind": "move",
+      "command_name": "mv",
+      "cwd": "/demo/workspace",
+      "exit_code": 0,
+      "shell": "zsh",
+      "arg_count": 2,
+      "succeeded": true,
+      "redacted_command": "mv <path> <path>",
+      "path": "/demo/workspace/archive/project-brief-reviewed-01.md",
+      "from_path": "/demo/workspace/inbox/project-brief-reviewed-01.md",
+      "paths": [
+        "/demo/workspace/inbox/project-brief-reviewed-01.md",
+        "/demo/workspace/archive/project-brief-reviewed-01.md"
+      ],
+      "path_count": 2,
+      "destructive": false
+    }
+  },
+  {
+    "ts": "2026-03-13T16:00:00Z",
+    "source": "Terminal",
+    "payload": {
+      "kind": "rename",
+      "command_name": "mv",
+      "cwd": "/demo/workspace",
+      "exit_code": 0,
+      "shell": "zsh",
+      "arg_count": 2,
+      "succeeded": true,
+      "redacted_command": "mv <path> <path>",
+      "path": "/demo/workspace/inbox/project-brief-reviewed-02.md",
+      "from_path": "/demo/workspace/inbox/project-brief-02.md",
+      "paths": [
+        "/demo/workspace/inbox/project-brief-02.md",
+        "/demo/workspace/inbox/project-brief-reviewed-02.md"
+      ],
+      "path_count": 2,
+      "destructive": false
+    }
+  },
+  {
+    "ts": "2026-03-13T16:00:20Z",
+    "source": "Terminal",
+    "payload": {
+      "kind": "move",
+      "command_name": "mv",
+      "cwd": "/demo/workspace",
+      "exit_code": 0,
+      "shell": "zsh",
+      "arg_count": 2,
+      "succeeded": true,
+      "redacted_command": "mv <path> <path>",
+      "path": "/demo/workspace/archive/project-brief-reviewed-02.md",
+      "from_path": "/demo/workspace/inbox/project-brief-reviewed-02.md",
+      "paths": [
+        "/demo/workspace/inbox/project-brief-reviewed-02.md",
+        "/demo/workspace/archive/project-brief-reviewed-02.md"
+      ],
+      "path_count": 2,
+      "destructive": false
+    }
+  }
+]

@@ -295,6 +295,7 @@ pub fn list_pending_observation_raw_events(
                 )
                 OR raw_events.source = ?2
                 OR raw_events.source = ?3
+                OR raw_events.source = ?4
             )
         ORDER BY raw_events.id ASC
         "#,
@@ -305,6 +306,7 @@ pub fn list_pending_observation_raw_events(
             format!("{:?}", EventSource::FileWatcher),
             format!("{:?}", EventSource::Terminal),
             format!("{:?}", EventSource::Clipboard),
+            format!("{:?}", EventSource::Browser),
         ],
         |row| {
             let ts: String = row.get(1)?;
@@ -1336,6 +1338,7 @@ mod tests {
     use super::*;
     use crate::migrations::run_migrations;
     use chrono::Utc;
+    use flow_adapters::browser::synthetic_download_event;
     use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
     use flow_adapters::terminal::synthetic_terminal_history_event;
     use flow_core::events::EventSource;
@@ -1480,6 +1483,38 @@ mod tests {
         assert_eq!(pending[0].event.payload, clipboard_raw.payload);
 
         let normalized = normalize(&clipboard_raw).unwrap();
+        let raw_id = conn.last_insert_rowid();
+        insert_normalized_event_for_raw_event(&mut conn, raw_id, &normalized).unwrap();
+
+        assert!(list_pending_observation_raw_events(&conn)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn lists_pending_browser_observation_events_without_normalized_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let browser_raw = synthetic_download_event(
+            Utc::now(),
+            "invoice-1201.pdf",
+            Some("/tmp/Downloads/invoice-1201.pdf".to_string()),
+            Some("chrome".to_string()),
+            Some("https://demo.local/files/invoice-1201.pdf".to_string()),
+            Some("https://demo.local/invoices".to_string()),
+            None,
+            true,
+        );
+        insert_raw_event(&conn, &browser_raw).unwrap();
+
+        let pending = list_pending_observation_raw_events(&conn).unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event.source, EventSource::Browser);
+        assert_eq!(pending[0].event.payload, browser_raw.payload);
+
+        let normalized = normalize(&browser_raw).unwrap();
         let raw_id = conn.last_insert_rowid();
         insert_normalized_event_for_raw_event(&mut conn, raw_id, &normalized).unwrap();
 
