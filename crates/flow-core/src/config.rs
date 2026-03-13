@@ -8,6 +8,44 @@ use crate::errors::FlowError;
 
 pub const PROJECT_CONFIG_FILE_NAME: &str = "flowd.toml";
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardCaptureMode {
+    MetadataOnly,
+    Redacted,
+    Content,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardPrivacyConfig {
+    pub mode: ClipboardCaptureMode,
+    pub max_capture_bytes: usize,
+}
+
+impl Default for ClipboardPrivacyConfig {
+    fn default() -> Self {
+        Self {
+            mode: ClipboardCaptureMode::MetadataOnly,
+            max_capture_bytes: 256,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardObservationConfig {
+    pub privacy: ClipboardPrivacyConfig,
+    pub poll_interval_ms: u64,
+}
+
+impl Default for ClipboardObservationConfig {
+    fn default() -> Self {
+        Self {
+            privacy: ClipboardPrivacyConfig::default(),
+            poll_interval_ms: 1000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -17,6 +55,9 @@ pub struct Config {
     pub observe_terminal: bool,
     pub observe_active_window: bool,
     pub redact_clipboard_content: bool,
+    pub clipboard_store_redacted_preview: bool,
+    pub clipboard_max_capture_bytes: usize,
+    pub clipboard_poll_interval_ms: u64,
     pub redact_command_args: bool,
     pub strip_browser_query_strings: bool,
     pub suggestion_min_usefulness_score: f64,
@@ -34,6 +75,9 @@ impl Default for Config {
             observe_terminal: true,
             observe_active_window: false,
             redact_clipboard_content: true,
+            clipboard_store_redacted_preview: false,
+            clipboard_max_capture_bytes: 256,
+            clipboard_poll_interval_ms: 1000,
             redact_command_args: true,
             strip_browser_query_strings: true,
             suggestion_min_usefulness_score: 0.0,
@@ -119,11 +163,43 @@ impl Config {
             ));
         }
 
+        if self.clipboard_max_capture_bytes == 0 {
+            return Err(FlowError::Validation(
+                "clipboard_max_capture_bytes must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.clipboard_poll_interval_ms == 0 {
+            return Err(FlowError::Validation(
+                "clipboard_poll_interval_ms must be greater than zero".to_string(),
+            ));
+        }
+
         Ok(())
     }
 
     pub fn to_pretty_toml(&self) -> Result<String, FlowError> {
         toml::to_string_pretty(self).map_err(FlowError::TomlSer)
+    }
+
+    pub fn clipboard_observation_config(&self) -> ClipboardObservationConfig {
+        ClipboardObservationConfig {
+            privacy: ClipboardPrivacyConfig {
+                mode: self.clipboard_capture_mode(),
+                max_capture_bytes: self.clipboard_max_capture_bytes,
+            },
+            poll_interval_ms: self.clipboard_poll_interval_ms,
+        }
+    }
+
+    pub fn clipboard_capture_mode(&self) -> ClipboardCaptureMode {
+        if !self.redact_clipboard_content {
+            ClipboardCaptureMode::Content
+        } else if self.clipboard_store_redacted_preview {
+            ClipboardCaptureMode::Redacted
+        } else {
+            ClipboardCaptureMode::MetadataOnly
+        }
     }
 }
 
@@ -246,6 +322,10 @@ mod tests {
         assert!(cfg.intelligence_enabled);
         assert_eq!(cfg.session_inactivity_secs, 300);
         assert_eq!(cfg.file_event_dedup_window_ms, 500);
+        assert_eq!(
+            cfg.clipboard_capture_mode(),
+            ClipboardCaptureMode::MetadataOnly
+        );
     }
 
     #[test]
@@ -268,6 +348,33 @@ observed_folders = ["~/Inbox"]
         assert!(!cfg.observe_clipboard);
         assert!(cfg.observe_terminal);
         assert_eq!(cfg.suggestion_min_usefulness_score, 0.0);
+    }
+
+    #[test]
+    fn derives_clipboard_capture_modes_from_legacy_flags() {
+        let metadata_only = Config::default();
+        assert_eq!(
+            metadata_only.clipboard_capture_mode(),
+            ClipboardCaptureMode::MetadataOnly
+        );
+
+        let redacted = Config {
+            clipboard_store_redacted_preview: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            redacted.clipboard_capture_mode(),
+            ClipboardCaptureMode::Redacted
+        );
+
+        let content = Config {
+            redact_clipboard_content: false,
+            ..Config::default()
+        };
+        assert_eq!(
+            content.clipboard_capture_mode(),
+            ClipboardCaptureMode::Content
+        );
     }
 
     #[test]

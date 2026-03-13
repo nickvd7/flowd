@@ -6,13 +6,7 @@ pub fn normalize(raw: &RawEvent) -> Option<NormalizedEvent> {
     match raw.source {
         EventSource::FileWatcher => normalize_file_event(raw),
         EventSource::Terminal => normalize_terminal_event(raw),
-        EventSource::Clipboard => Some(NormalizedEvent {
-            ts: raw.ts,
-            action_type: ActionType::CopyText,
-            app: None,
-            target: None,
-            metadata: raw.payload.clone(),
-        }),
+        EventSource::Clipboard => normalize_clipboard_event(raw),
         EventSource::Browser => Some(NormalizedEvent {
             ts: raw.ts,
             action_type: ActionType::VisitUrl,
@@ -40,6 +34,53 @@ pub fn normalize(raw: &RawEvent) -> Option<NormalizedEvent> {
             metadata: json!({ "source": "active_window" }),
         }),
     }
+}
+
+fn normalize_clipboard_event(raw: &RawEvent) -> Option<NormalizedEvent> {
+    let kind = raw.payload.get("kind").and_then(|value| value.as_str())?;
+    if kind != "clipboard_change" {
+        return None;
+    }
+
+    let category = raw
+        .payload
+        .get("category")
+        .and_then(|value| value.as_str())
+        .unwrap_or("text");
+    let target = raw
+        .payload
+        .get("content_preview")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            raw.payload
+                .get("redacted_preview")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        });
+
+    Some(NormalizedEvent {
+        ts: raw.ts,
+        action_type: ActionType::CopyText,
+        app: Some("clipboard".to_string()),
+        target,
+        metadata: json!({
+            "kind": kind,
+            "capture_mode": raw.payload.get("capture_mode").cloned().unwrap_or_default(),
+            "content_type": raw.payload.get("content_type").cloned().unwrap_or_default(),
+            "category": category,
+            "content_length": raw.payload.get("content_length").cloned().unwrap_or_default(),
+            "line_count": raw.payload.get("line_count").cloned().unwrap_or_default(),
+            "word_count": raw.payload.get("word_count").cloned().unwrap_or_default(),
+            "contains_whitespace": raw.payload.get("contains_whitespace").cloned().unwrap_or_default(),
+            "captured": raw.payload.get("captured").cloned().unwrap_or_default(),
+            "truncated": raw.payload.get("truncated").cloned().unwrap_or_default(),
+            "redacted_preview": raw.payload.get("redacted_preview").cloned().unwrap_or_default(),
+            "content_preview": raw.payload.get("content_preview").cloned().unwrap_or_default(),
+            "source": "clipboard",
+            "file_group": clipboard_group(category),
+        }),
+    })
 }
 
 fn normalize_file_event(raw: &RawEvent) -> Option<NormalizedEvent> {
@@ -180,12 +221,27 @@ fn command_group(path_or_cwd: &str, command_name: &str) -> String {
     }
 }
 
+fn clipboard_group(category: &str) -> String {
+    match category {
+        "path" => "clipboard_path".to_string(),
+        "filename" => "clipboard_filename".to_string(),
+        "url" => "clipboard_url".to_string(),
+        "json" | "structured_text" => "clipboard_structured".to_string(),
+        "binary" => "clipboard_binary".to_string(),
+        _ => "clipboard_text".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use flow_adapters::file_watcher::{synthetic_file_event, FileEventKind};
     use flow_adapters::terminal::synthetic_terminal_history_event;
+    use flow_adapters::{
+        clipboard::synthetic_clipboard_event,
+        file_watcher::{synthetic_file_event, FileEventKind},
+    };
+    use flow_core::config::{ClipboardCaptureMode, ClipboardPrivacyConfig};
 
     #[test]
     fn normalizes_file_events_with_group_metadata() {
@@ -246,5 +302,41 @@ mod tests {
         assert_eq!(event.metadata["destructive"], true);
         assert_eq!(event.metadata["command_name"], "rm");
         assert_eq!(event.metadata["file_group"], "secrets");
+    }
+
+    #[test]
+    fn normalizes_clipboard_events_with_deterministic_metadata() {
+        let raw = synthetic_clipboard_event(
+            Utc.with_ymd_and_hms(2026, 3, 13, 10, 0, 0).unwrap(),
+            b"/tmp/archive/report.txt",
+            &ClipboardPrivacyConfig::default(),
+        );
+
+        let event = normalize(&raw).unwrap();
+
+        assert_eq!(event.action_type, ActionType::CopyText);
+        assert_eq!(event.app.as_deref(), Some("clipboard"));
+        assert_eq!(event.target, None);
+        assert_eq!(event.metadata["source"], "clipboard");
+        assert_eq!(event.metadata["category"], "path");
+        assert_eq!(event.metadata["capture_mode"], "metadata_only");
+        assert_eq!(event.metadata["file_group"], "clipboard_path");
+    }
+
+    #[test]
+    fn prefers_redacted_or_content_preview_as_clipboard_target() {
+        let raw = synthetic_clipboard_event(
+            Utc.with_ymd_and_hms(2026, 3, 13, 10, 1, 0).unwrap(),
+            b"Invoice-1001.pdf",
+            &ClipboardPrivacyConfig {
+                mode: ClipboardCaptureMode::Redacted,
+                max_capture_bytes: 64,
+            },
+        );
+
+        let event = normalize(&raw).unwrap();
+
+        assert_eq!(event.target.as_deref(), Some("Xxxxxxx-0000.xxx"));
+        assert_eq!(event.metadata["captured"], true);
     }
 }

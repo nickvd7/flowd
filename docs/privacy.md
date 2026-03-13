@@ -8,7 +8,10 @@
 - start with reversible actions only
 
 ## Recommended defaults
-- redact clipboard content unless explicitly enabled
+- keep clipboard observation disabled unless explicitly enabled
+- keep clipboard capture in metadata-only mode by default
+- allow redacted clipboard previews only when explicitly configured
+- allow limited plaintext clipboard previews only when clipboard redaction is disabled
 - redact terminal command arguments where possible
 - strip browser query strings by default
 - limit observation to selected folders and sources

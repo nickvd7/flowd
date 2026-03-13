@@ -3,6 +3,7 @@ mod observation;
 use anyhow::{Context, Result};
 use chrono::Duration;
 use clap::Parser;
+use flow_adapters::clipboard::{ClipboardObserver, ClipboardReadError, CommandClipboardReader};
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
 use flow_analysis::catch_up_analysis;
 use flow_core::config::{expand_home, Config};
@@ -10,6 +11,7 @@ use flow_db::open_database as open_sqlite_database;
 use observation::ObservationPipeline;
 use rusqlite::Connection;
 use std::path::PathBuf;
+use std::sync::mpsc::RecvTimeoutError;
 
 #[derive(Debug, Parser)]
 #[command(name = "flow-daemon", version, about = "Daemon for flowd")]
@@ -38,6 +40,7 @@ fn run() -> Result<()> {
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
     let mut observation =
         ObservationPipeline::new(Duration::milliseconds(config.file_event_dedup_window_ms));
+    let mut clipboard = build_clipboard_observer(&config);
 
     for path in &observed_paths {
         watch_path(&mut watcher, path)
@@ -45,27 +48,76 @@ fn run() -> Result<()> {
         println!("watching {}", path.display());
     }
 
-    for result in rx {
-        match result {
-            Ok(event) => {
-                for file_event in event_to_file_events(&event) {
-                    let Some(raw_event) = observation
-                        .accept(&conn, file_event)
-                        .context("failed during observation")?
-                    else {
-                        continue;
-                    };
+    if config.observe_clipboard {
+        match clipboard {
+            Some(_) => println!(
+                "clipboard observation enabled in {} mode",
+                serde_json::to_string(&config.clipboard_capture_mode())?.trim_matches('"')
+            ),
+            None => eprintln!(
+                "clipboard observation is enabled but no supported local backend was found"
+            ),
+        }
+    }
 
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(
+            config.clipboard_poll_interval_ms,
+        )) {
+            Ok(result) => match result {
+                Ok(event) => {
+                    for file_event in event_to_file_events(&event) {
+                        let Some(raw_event) = observation
+                            .accept(&conn, file_event)
+                            .context("failed during observation")?
+                        else {
+                            continue;
+                        };
+
+                        catch_up_analysis(&mut conn, config.session_inactivity_secs)
+                            .context("failed during analysis refresh")?;
+                        println!("{}", serde_json::to_string(&raw_event)?);
+                    }
+                }
+                Err(error) => eprintln!("watch error: {error}"),
+            },
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+
+        if let Some(observer) = clipboard.as_mut() {
+            match observer.poll() {
+                Ok(Some(raw_event)) => {
+                    observation
+                        .accept_raw_event(&conn, raw_event.clone())
+                        .context("failed during clipboard observation")?;
                     catch_up_analysis(&mut conn, config.session_inactivity_secs)
                         .context("failed during analysis refresh")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
+                Ok(None) => {}
+                Err(error) => handle_clipboard_error(error),
             }
-            Err(error) => eprintln!("watch error: {error}"),
         }
     }
 
     Ok(())
+}
+
+fn build_clipboard_observer(config: &Config) -> Option<ClipboardObserver<CommandClipboardReader>> {
+    if !config.observe_clipboard {
+        return None;
+    }
+
+    let reader = CommandClipboardReader::detect()?;
+    Some(ClipboardObserver::new(
+        reader,
+        config.clipboard_observation_config(),
+    ))
+}
+
+fn handle_clipboard_error(error: ClipboardReadError) {
+    eprintln!("clipboard observation error: {error}");
 }
 
 fn resolve_observed_paths(config: &Config) -> Result<Vec<PathBuf>> {
