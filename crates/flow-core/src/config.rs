@@ -153,6 +153,29 @@ pub fn standard_config_path() -> Option<PathBuf> {
     standard_config_path_from(xdg_config_home.as_deref(), home.as_deref())
 }
 
+pub fn preferred_setup_config_path() -> Result<PathBuf, FlowError> {
+    let current_dir = env::current_dir().map_err(FlowError::Io)?;
+    let xdg_config_home = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    let home = home_dir();
+    Ok(preferred_setup_config_path_from(
+        &current_dir,
+        xdg_config_home.as_deref(),
+        home.as_deref(),
+    ))
+}
+
+fn preferred_setup_config_path_from(
+    current_dir: &Path,
+    xdg_config_home: Option<&Path>,
+    home: Option<&Path>,
+) -> PathBuf {
+    if let Some(path) = standard_config_path_from(xdg_config_home, home) {
+        return path;
+    }
+
+    current_dir.join(PROJECT_CONFIG_FILE_NAME)
+}
+
 pub fn expand_home(raw: &str) -> PathBuf {
     if raw == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(raw));
@@ -277,5 +300,12 @@ observed_folders = []
         let dir = tempdir().unwrap();
         let path = standard_config_path_from(Some(dir.path()), None).unwrap();
         assert_eq!(path, dir.path().join("flowd").join("config.toml"));
+    }
+
+    #[test]
+    fn preferred_setup_path_falls_back_to_current_directory() {
+        let dir = tempdir().unwrap();
+        let path = preferred_setup_config_path_from(dir.path(), None, None);
+        assert_eq!(path, dir.path().join(PROJECT_CONFIG_FILE_NAME));
     }
 }
