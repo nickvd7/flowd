@@ -1,0 +1,68 @@
+[
+  {
+    "ts": "2026-03-13T09:00:02Z",
+    "source": "Browser",
+    "payload": {
+      "kind": "download",
+      "filename": "invoice-1001.pdf",
+      "path": "/demo/Downloads/invoice-1001.pdf",
+      "extension": "pdf",
+      "browser": "chrome",
+      "source_url": "https://demo.local/files/invoice-1001.pdf",
+      "page_url": "https://demo.local/invoices",
+      "started_at": "2026-03-13T09:00:00+00:00",
+      "duration_ms": 2000
+    }
+  },
+  {
+    "ts": "2026-03-13T09:00:20Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "rename",
+      "path": "/demo/Downloads/invoice-1001-reviewed.pdf",
+      "from_path": "/demo/Downloads/invoice-1001.pdf"
+    }
+  },
+  {
+    "ts": "2026-03-13T09:00:40Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Documents/Accounting/Invoices/invoice-1001-reviewed.pdf",
+      "from_path": "/demo/Downloads/invoice-1001-reviewed.pdf"
+    }
+  },
+  {
+    "ts": "2026-03-13T10:00:02Z",
+    "source": "Browser",
+    "payload": {
+      "kind": "download",
+      "filename": "invoice-1002.pdf",
+      "path": "/demo/Downloads/invoice-1002.pdf",
+      "extension": "pdf",
+      "browser": "chrome",
+      "source_url": "https://demo.local/files/invoice-1002.pdf",
+      "page_url": "https://demo.local/invoices",
+      "started_at": "2026-03-13T10:00:00+00:00",
+      "duration_ms": 2000
+    }
+  },
+  {
+    "ts": "2026-03-13T10:00:20Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "rename",
+      "path": "/demo/Downloads/invoice-1002-reviewed.pdf",
+      "from_path": "/demo/Downloads/invoice-1002.pdf"
+    }
+  },
+  {
+    "ts": "2026-03-13T10:00:40Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Documents/Accounting/Invoices/invoice-1002-reviewed.pdf",
+      "from_path": "/demo/Downloads/invoice-1002-reviewed.pdf"
+    }
+  }
+]

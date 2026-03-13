@@ -107,6 +107,10 @@ fn suggestions_renders_detected_suggestions_table() {
         ],
         &rows,
     );
+    let expected = format!(
+        "{}\nNext steps:\n1. Inspect one suggestion: flowctl suggestions explain 1\n2. Review suggestion history: flowctl suggestions history\n3. Approve a suggestion: flowctl approve 1\n",
+        expected
+    );
     assert_eq!(stdout, expected);
 }
 
@@ -279,6 +283,10 @@ fn approve_creates_automation_and_lists_it() {
     assert!(approve.status.success());
     let approve_stdout = String::from_utf8(approve.stdout).unwrap();
     assert!(approve_stdout.contains("Approved suggestion 1 as automation 1"));
+    assert!(approve_stdout.contains("Next steps:"));
+    assert!(approve_stdout.contains("flowctl automations show 1"));
+    assert!(approve_stdout.contains("flowctl dry-run 1"));
+    assert!(approve_stdout.contains("flowctl run 1"));
 
     let automations = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("automations")
@@ -444,6 +452,10 @@ fn automations_show_renders_detailed_report() {
     let spec = flow_dsl::parse_spec(&automation.spec_yaml).unwrap();
     let preview = preview_automation(&conn, 1).unwrap();
     let expected = format_automation_report(&automation, &spec, &preview);
+    let expected = format!(
+        "{}\n\nNext steps:\n1. Preview this automation: flowctl dry-run 1\n2. Run this automation: flowctl run 1\n3. Review automation run history: flowctl runs\n",
+        expected.trim_end()
+    );
     assert_eq!(stdout, expected);
     assert!(stdout.contains("trigger:"));
     assert!(stdout.contains("actions:"));

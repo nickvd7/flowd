@@ -30,8 +30,49 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const ROOT_AFTER_HELP: &str = "\
+Examples:
+  flowctl setup --watch ~/Downloads
+  flowctl config show
+  flowctl suggestions
+  flowctl suggestions explain 1
+  flowctl suggestions history
+  flowctl approve 1
+  flowctl automations show 1
+  flowctl stats";
+
+const CONFIG_AFTER_HELP: &str = "\
+Examples:
+  flowctl config show
+  flowctl config validate
+  flowctl config path";
+
+const SUGGESTIONS_AFTER_HELP: &str = "\
+Examples:
+  flowctl suggestions
+  flowctl suggestions --explain
+  flowctl suggestions explain 1
+  flowctl suggestions show 1
+  flowctl suggestions history
+  flowctl approve 1";
+
+const AUTOMATIONS_AFTER_HELP: &str = "\
+Examples:
+  flowctl automations
+  flowctl automations show 1
+  flowctl dry-run 1
+  flowctl run 1
+  flowctl runs";
+
 #[derive(Debug, Parser)]
-#[command(name = "flowctl", version, about = "CLI for flowd")]
+#[command(
+    name = "flowctl",
+    version,
+    about = "Inspect local workflow suggestions, automations, and config for flowd",
+    long_about = None,
+    arg_required_else_help = true,
+    after_help = ROOT_AFTER_HELP
+)]
 struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -41,57 +82,85 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Show flowd status")]
     Status,
+    #[command(about = "Create or update a local flowd config")]
     Setup {
         #[arg(long = "watch", value_name = "PATH")]
         watch: Vec<String>,
         #[arg(long)]
         force: bool,
     },
+    #[command(
+        about = "Inspect the resolved flowd config",
+        after_help = CONFIG_AFTER_HELP
+    )]
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    #[command(about = "Show local workflow and automation totals")]
     Stats,
+    #[command(about = "List detected repeated workflow patterns")]
     Patterns,
+    #[command(about = "Print concise suggestion summaries")]
     Suggest {
         #[arg(long)]
         explain: bool,
     },
+    #[command(
+        about = "List suggestions and inspect explainability or feedback history",
+        after_help = SUGGESTIONS_AFTER_HELP
+    )]
     Suggestions {
         #[command(subcommand)]
         command: Option<SuggestionsCommand>,
         #[arg(long)]
         explain: bool,
     },
+    #[command(about = "List recent workflow sessions")]
     Sessions,
+    #[command(about = "Tail flowd activity output")]
     Tail,
+    #[command(about = "Approve a suggestion into a deterministic automation")]
     Approve {
         suggestion_id: i64,
     },
+    #[command(about = "Reject a suggestion and hide it from pending results")]
     Reject {
         suggestion_id: i64,
     },
+    #[command(about = "Snooze a suggestion and hide it from pending results")]
     Snooze {
         suggestion_id: i64,
     },
+    #[command(
+        about = "List approved automations and inspect one in detail",
+        after_help = AUTOMATIONS_AFTER_HELP
+    )]
     Automations {
         #[command(subcommand)]
         command: Option<AutomationsCommand>,
     },
+    #[command(about = "Disable an automation without deleting it")]
     Disable {
         automation_id: i64,
     },
+    #[command(about = "Re-enable a disabled automation")]
     Enable {
         automation_id: i64,
     },
+    #[command(about = "Execute an automation against matching files")]
     Run {
         automation_id: i64,
     },
+    #[command(about = "Preview an automation without changing files")]
     DryRun {
         automation_id: i64,
     },
+    #[command(about = "List automation run history")]
     Runs,
+    #[command(about = "Undo one completed automation run")]
     Undo {
         run_id: i64,
     },
@@ -99,20 +168,27 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum SuggestionsCommand {
+    #[command(about = "Show explainability and preview details for one suggestion")]
     Explain { suggestion_id: i64 },
+    #[command(about = "Show suggestion feedback history")]
     History,
+    #[command(about = "Show detailed feedback fields for one suggestion")]
     Show { suggestion_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
 enum AutomationsCommand {
+    #[command(about = "Show one automation with preview details")]
     Show { automation_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
+    #[command(about = "Print the resolved config values")]
     Show,
+    #[command(about = "Validate the resolved config")]
     Validate,
+    #[command(about = "Print the config source path")]
     Path,
 }
 
@@ -185,7 +261,7 @@ fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Runs) => render_runs(&context)?,
         Some(Commands::Undo { run_id }) => undo_run_command(&context, run_id)?,
-        None => println!("Use --help to see available commands."),
+        None => unreachable!("clap handles missing commands"),
     }
 
     Ok(())
@@ -300,18 +376,23 @@ fn render_setup_report(
     }
 
     lines.push(String::new());
-    lines.push("Next steps:".to_string());
-    lines.push(format!("1. Start the daemon: {daemon_command}"));
-    lines.push(format!(
-        "2. Inspect suggestions: {flowctl_prefix} suggestions"
-    ));
-    lines.push(format!(
-        "3. Approve an automation: {flowctl_prefix} approve <suggestion_id>"
-    ));
-    lines.push(format!(
-        "4. Inspect generated config: {flowctl_prefix} config show"
-    ));
+    lines.extend(render_next_steps(&[
+        format!("Start the daemon: {daemon_command}"),
+        format!("Inspect generated config: {flowctl_prefix} config show"),
+        format!("Inspect suggestions: {flowctl_prefix} suggestions"),
+        format!("Review local stats: {flowctl_prefix} stats"),
+    ]));
 
+    lines
+}
+
+fn render_next_steps(steps: &[String]) -> Vec<String> {
+    let mut lines = vec!["Next steps:".to_string()];
+    lines.extend(
+        steps.iter()
+            .enumerate()
+            .map(|(index, step)| format!("{}. {step}", index + 1)),
+    );
     lines
 }
 
@@ -372,6 +453,7 @@ fn render_suggestions(context: &RuntimeContext, explain: bool) -> anyhow::Result
         return Ok(());
     }
 
+    let first_suggestion_id = suggestions.first().map(|result| result.suggestion.suggestion_id);
     mark_suggestions_displayed_from_results(&mut conn, &suggestions)?;
 
     for suggestion in suggestions {
@@ -392,6 +474,17 @@ fn render_suggestions(context: &RuntimeContext, explain: bool) -> anyhow::Result
             for line in render_explainability_lines(&suggestion.explainability) {
                 println!("  {line}");
             }
+        }
+    }
+
+    if let Some(suggestion_id) = first_suggestion_id {
+        println!();
+        for line in render_next_steps(&[
+            format!("Inspect one suggestion: flowctl suggestions explain {suggestion_id}"),
+            "Review suggestion history: flowctl suggestions history".to_string(),
+            format!("Approve a suggestion: flowctl approve {suggestion_id}"),
+        ]) {
+            println!("{line}");
         }
     }
 
@@ -456,11 +549,22 @@ fn render_suggestions_table(context: &RuntimeContext, explain: bool) -> anyhow::
         return Ok(());
     }
 
+    let first_suggestion_id = suggestions.first().map(|result| result.suggestion.suggestion_id);
     mark_suggestions_displayed_from_results(&mut conn, &suggestions)?;
     print_table(
         &suggestion_table_headers(explain),
         &suggestion_display_rows(suggestions, explain),
     );
+    if let Some(suggestion_id) = first_suggestion_id {
+        println!();
+        for line in render_next_steps(&[
+            format!("Inspect one suggestion: flowctl suggestions explain {suggestion_id}"),
+            "Review suggestion history: flowctl suggestions history".to_string(),
+            format!("Approve a suggestion: flowctl approve {suggestion_id}"),
+        ]) {
+            println!("{line}");
+        }
+    }
     Ok(())
 }
 
@@ -571,6 +675,14 @@ fn approve_automation_command(context: &RuntimeContext, suggestion_id: i64) -> a
         approve_suggestion(&mut conn, suggestion_id).context("failed to approve suggestion")?;
 
     println!("Approved suggestion {suggestion_id} as automation {automation_id}.");
+    println!();
+    for line in render_next_steps(&[
+        format!("Inspect the automation: flowctl automations show {automation_id}"),
+        format!("Preview the automation: flowctl dry-run {automation_id}"),
+        format!("Run the automation: flowctl run {automation_id}"),
+    ]) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -649,6 +761,14 @@ fn show_automation_command(context: &RuntimeContext, automation_id: i64) -> anyh
         preview_automation(&conn, automation_id).context("failed to preview automation impact")?;
 
     for line in render_automation_report(&automation, &spec, &preview) {
+        println!("{line}");
+    }
+    println!();
+    for line in render_next_steps(&[
+        format!("Preview this automation: flowctl dry-run {automation_id}"),
+        format!("Run this automation: flowctl run {automation_id}"),
+        "Review automation run history: flowctl runs".to_string(),
+    ]) {
         println!("{line}");
     }
 
@@ -1280,7 +1400,7 @@ fn format_timestamp(value: &str) -> String {
 }
 
 fn render_stats_report(stats: &LocalUsageStats) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         "Local usage stats".to_string(),
         format!("patterns_detected: {}", stats.pattern_count),
         format!("suggestions_created: {}", stats.suggestion_count),
@@ -1291,7 +1411,14 @@ fn render_stats_report(stats: &LocalUsageStats) -> Vec<String> {
             "estimated_time_saved: {}",
             format_duration(stats.estimated_time_saved_ms)
         ),
-    ]
+    ];
+    lines.push(String::new());
+    lines.extend(render_next_steps(&[
+        "Inspect pending suggestions: flowctl suggestions".to_string(),
+        "Inspect approved automations: flowctl automations".to_string(),
+        "Inspect config values: flowctl config show".to_string(),
+    ]));
+    lines
 }
 
 #[cfg(test)]
@@ -1403,6 +1530,11 @@ mod tests {
                 "automation_runs: 5".to_string(),
                 "undo_runs: 1".to_string(),
                 "estimated_time_saved: 1m 30s".to_string(),
+                String::new(),
+                "Next steps:".to_string(),
+                "1. Inspect pending suggestions: flowctl suggestions".to_string(),
+                "2. Inspect approved automations: flowctl automations".to_string(),
+                "3. Inspect config values: flowctl config show".to_string(),
             ]
         );
     }
