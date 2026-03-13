@@ -43,6 +43,24 @@ pub struct StoredSuggestionHistory {
     pub last_snoozed_ts: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSuggestionRecord {
+    pub suggestion_id: i64,
+    pub pattern_id: i64,
+    pub status: String,
+    pub signature: String,
+    pub canonical_summary: String,
+    pub proposal_text: String,
+    pub shown_count: u32,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub snoozed_count: u32,
+    pub last_shown_ts: Option<String>,
+    pub last_accepted_ts: Option<String>,
+    pub last_rejected_ts: Option<String>,
+    pub last_snoozed_ts: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SuggestionDetails {
     pub suggestion_id: i64,
@@ -710,6 +728,67 @@ pub fn get_suggestion(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+pub fn list_all_suggestion_records(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<StoredSuggestionRecord>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            suggestions.id,
+            suggestions.pattern_id,
+            suggestions.status,
+            patterns.signature,
+            COALESCE(patterns.canonical_summary, ''),
+            suggestions.proposal_json,
+            suggestions.shown_count,
+            suggestions.accepted_count,
+            suggestions.rejected_count,
+            suggestions.snoozed_count,
+            suggestions.last_shown_ts,
+            suggestions.last_accepted_ts,
+            suggestions.last_rejected_ts,
+            suggestions.last_snoozed_ts
+        FROM suggestions
+        INNER JOIN patterns ON patterns.id = suggestions.pattern_id
+        ORDER BY suggestions.id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        let proposal_json: String = row.get(5)?;
+        let proposal: Value = serde_json::from_str(&proposal_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                proposal_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+
+        Ok(StoredSuggestionRecord {
+            suggestion_id: row.get(0)?,
+            pattern_id: row.get(1)?,
+            status: row.get(2)?,
+            signature: row.get(3)?,
+            canonical_summary: row.get(4)?,
+            proposal_text: proposal
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            shown_count: row.get::<_, i64>(6)? as u32,
+            accepted_count: row.get::<_, i64>(7)? as u32,
+            rejected_count: row.get::<_, i64>(8)? as u32,
+            snoozed_count: row.get::<_, i64>(9)? as u32,
+            last_shown_ts: row.get(10)?,
+            last_accepted_ts: row.get(11)?,
+            last_rejected_ts: row.get(12)?,
+            last_snoozed_ts: row.get(13)?,
+        })
+    })?;
+
+    rows.collect()
 }
 
 pub fn set_suggestion_status(
