@@ -151,6 +151,7 @@ observe -> detect patterns -> suggest automations -> approve
 Useful commands:
 
 ```bash
+flowctl stats
 flowctl patterns
 flowctl suggestions
 flowctl approve <suggestion_id>
