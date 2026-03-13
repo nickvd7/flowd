@@ -11,4 +11,4 @@ Current scenario set:
 - `downloads_sorting`
 - `terminal_file_organization`
 
-The manifest at [`fixtures/demo_scenarios/manifest.json`](/Users/nickvandort/Documents/Coding/flowd/fixtures/demo_scenarios/manifest.json) is the entry point for loading those fixtures programmatically.
+The manifest at [`fixtures/demo_scenarios/manifest.json`](demo_scenarios/manifest.json) is the entry point for loading those fixtures programmatically.

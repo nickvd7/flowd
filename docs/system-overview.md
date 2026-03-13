@@ -105,7 +105,7 @@ Hard boundary rules:
 - `flowd-intelligence` must never own event capture, persistence, sessions, patterns, baseline suggestion generation, approval, execution, or undo.
 - Open-core must remain usable without private intelligence.
 
-The one explicit boundary module inside the public repo is [crates/flow-analysis/src/intelligence_boundary.rs](/Users/nickvandort/Documents/Coding/flowd/crates/flow-analysis/src/intelligence_boundary.rs). All private integration should pass through that module so the rest of the workspace stays free of private contracts.
+The one explicit boundary module inside the public repo is [`crates/flow-analysis/src/intelligence_boundary.rs`](../crates/flow-analysis/src/intelligence_boundary.rs). All private integration should pass through that module so the rest of the workspace stays free of private contracts.
 
 This boundary is what keeps the open-core engine viable as a standalone product. `flowd-intelligence` can improve decision quality, but it cannot absorb ownership of core system responsibilities.
 
@@ -218,10 +218,10 @@ Repository ownership should stay easy to reason about: `flowd` owns the engine, 
 
 ## 7. Next integration steps
 
-- Keep the boundary contract in [crates/flow-analysis/src/intelligence_boundary.rs](/Users/nickvandort/Documents/Coding/flowd/crates/flow-analysis/src/intelligence_boundary.rs) stable and versioned by code review discipline.
+- Keep the boundary contract in [`crates/flow-analysis/src/intelligence_boundary.rs`](../crates/flow-analysis/src/intelligence_boundary.rs) stable and versioned by code review discipline.
 - Extend deterministic fixture coverage for boundary DTO mapping, feedback-history propagation, and explainability fallback behavior.
 - Keep repository models and migration docs aligned whenever feedback-history fields change.
 - Add more private replay scenarios in `flowd-intelligence` without moving state ownership out of `flowd`.
 - Preserve graceful degradation so new private decision features never block the open-core baseline path.
 
-For lower-level detail, see [docs/architecture.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture.md), [docs/architecture-diagram.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture-diagram.md), and [docs/event-model.md](/Users/nickvandort/Documents/Coding/flowd/docs/event-model.md).
+For lower-level detail, see [Architecture](architecture.md), [Architecture Diagram](architecture-diagram.md), and [Event Model](event-model.md).

@@ -9,7 +9,7 @@ Each scenario:
 - stays deterministic by using fixed timestamps and local-only paths
 - avoids GUI steps and cloud dependencies
 
-The canonical index is [`manifest.json`](/Users/nickvandort/Documents/Coding/flowd/fixtures/demo_scenarios/manifest.json). It lists the included scenarios, the fixture file for each one, and the expected replay result used by regression tests.
+The canonical index is [`manifest.json`](manifest.json). It lists the included scenarios, the fixture file for each one, and the expected replay result used by regression tests.
 
 Included scenarios:
 
