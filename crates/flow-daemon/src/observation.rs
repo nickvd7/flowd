@@ -25,8 +25,13 @@ impl ObservationPipeline {
         }
 
         let raw_event = file_event.into_raw_event();
-        insert_raw_event(conn, &raw_event).context("failed to insert raw event")?;
+        self.accept_raw_event(conn, raw_event.clone())?;
         Ok(Some(raw_event))
+    }
+
+    pub fn accept_raw_event(&self, conn: &Connection, raw_event: RawEvent) -> Result<()> {
+        insert_raw_event(conn, &raw_event).context("failed to insert raw event")?;
+        Ok(())
     }
 }
 
