@@ -294,6 +294,7 @@ pub fn list_pending_observation_raw_events(
                     )
                 )
                 OR raw_events.source = ?2
+                OR raw_events.source = ?3
             )
         ORDER BY raw_events.id ASC
         "#,
@@ -303,6 +304,7 @@ pub fn list_pending_observation_raw_events(
         [
             format!("{:?}", EventSource::FileWatcher),
             format!("{:?}", EventSource::Terminal),
+            format!("{:?}", EventSource::Clipboard),
         ],
         |row| {
             let ts: String = row.get(1)?;
@@ -1447,6 +1449,39 @@ mod tests {
         let normalized = normalize(&terminal_raw).unwrap();
         let terminal_raw_id = conn.last_insert_rowid();
         insert_normalized_event_for_raw_event(&mut conn, terminal_raw_id, &normalized).unwrap();
+
+        assert!(list_pending_observation_raw_events(&conn)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn lists_pending_clipboard_observation_events_without_normalized_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let clipboard_raw = RawEvent {
+            ts: Utc::now(),
+            source: EventSource::Clipboard,
+            payload: json!({
+                "kind": "clipboard_change",
+                "capture_mode": "metadata_only",
+                "category": "path",
+                "content_length": 15,
+                "captured": false
+            }),
+        };
+        insert_raw_event(&conn, &clipboard_raw).unwrap();
+
+        let pending = list_pending_observation_raw_events(&conn).unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].event.source, EventSource::Clipboard);
+        assert_eq!(pending[0].event.payload, clipboard_raw.payload);
+
+        let normalized = normalize(&clipboard_raw).unwrap();
+        let raw_id = conn.last_insert_rowid();
+        insert_normalized_event_for_raw_event(&mut conn, raw_id, &normalized).unwrap();
 
         assert!(list_pending_observation_raw_events(&conn)
             .unwrap()
