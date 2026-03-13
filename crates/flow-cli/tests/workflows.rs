@@ -238,6 +238,93 @@ fn suggestions_show_reports_missing_suggestion() {
 }
 
 #[test]
+fn intelligence_export_feedback_writes_deterministic_json_file() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    let export_path = temp_dir.path().join("exports").join("feedback.json");
+    seed_database(&db_path);
+
+    let suggest = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .arg("suggestions")
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(suggest.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args([
+            "intelligence",
+            "export-feedback",
+            "--output",
+            export_path.to_str().unwrap(),
+            "--generated-at",
+            "2026-03-13T12:00:00+00:00",
+        ])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "Exported 1 suggestion records to {}\n",
+            export_path.display()
+        )
+    );
+
+    let exported = std::fs::read_to_string(&export_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(json["schema_name"], "flowd.intelligence_feedback_export");
+    assert_eq!(json["export_version"], 1);
+    assert_eq!(json["generated_at"], "2026-03-13T12:00:00+00:00");
+    assert_eq!(json["context"]["candidate_count"], 1);
+    assert_eq!(json["context"]["feedback_summary"]["shown_count"], 1);
+    assert_eq!(json["suggestion_records"][0]["status"], "pending");
+    assert_eq!(json["suggestion_records"][0]["feedback"]["shown_count"], 1);
+    assert_eq!(
+        json["suggestion_records"][0]["evaluation_context"]["pattern"]["count"],
+        2
+    );
+    assert!(
+        json["suggestion_records"][0]["evaluation_context"]["recency"]["reference_ts"].is_string()
+    );
+}
+
+#[test]
+fn intelligence_export_feedback_handles_empty_database() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    let export_path = temp_dir.path().join("feedback.json");
+    let conn = Connection::open(&db_path).unwrap();
+    run_migrations(&conn).unwrap();
+    drop(conn);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args([
+            "intelligence",
+            "export-feedback",
+            "--output",
+            export_path.to_str().unwrap(),
+            "--generated-at",
+            "2026-03-13T12:00:00+00:00",
+        ])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let exported = std::fs::read_to_string(&export_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(json["schema_name"], "flowd.intelligence_feedback_export");
+    assert_eq!(json["export_version"], 1);
+    assert_eq!(json["context"]["candidate_count"], 0);
+    assert_eq!(json["context"]["feedback_summary"]["shown_count"], 0);
+    assert_eq!(json["suggestion_records"], serde_json::json!([]));
+}
+
+#[test]
 fn sessions_renders_recent_sessions_table() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("flowd.db");
@@ -295,7 +382,12 @@ fn watch_once_renders_deterministic_activity_snapshot() {
             .iter()
             .map(|event| render_watch_normalized_event(&event.event)),
     );
-    expected_lines.extend(list_sessions(&conn).unwrap().iter().map(render_watch_session));
+    expected_lines.extend(
+        list_sessions(&conn)
+            .unwrap()
+            .iter()
+            .map(render_watch_session),
+    );
     expected_lines.extend(
         list_patterns(&conn)
             .unwrap()

@@ -198,7 +198,9 @@ fn root_help_lists_discoverable_commands_and_examples() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Inspect local workflow suggestions, automations, and config for flowd"));
+    assert!(
+        stdout.contains("Inspect local workflow suggestions, automations, and config for flowd")
+    );
     assert!(stdout.contains("suggestions"));
     assert!(stdout.contains("stats"));
     assert!(stdout.contains("config"));
