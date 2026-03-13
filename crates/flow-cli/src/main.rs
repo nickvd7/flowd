@@ -2,8 +2,11 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use flow_analysis::intelligence_boundary::{
-    ExplainabilitySource, IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient,
-    SuggestionDecisionAction, SuggestionDisplayResult, SuggestionExplainability,
+    build_envelope_from_contexts, map_stored_suggestions_to_contexts, ExplainabilitySource,
+    IntelligenceBoundary, IntelligenceClient, InternalFeedbackSummary, InternalPatternMetadata,
+    InternalRecencySignals, InternalSessionSummary, InternalSuggestionHistory,
+    NoopIntelligenceClient, SuggestionDecisionAction, SuggestionDisplayResult,
+    SuggestionExplainability,
 };
 use flow_core::config::{
     expand_home, preferred_setup_config_path, Config, ConfigSource, LoadedConfig,
@@ -14,8 +17,9 @@ use flow_db::{
         get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
         list_all_suggestion_records, list_automations, list_normalized_events_after, list_patterns,
         list_raw_events_after, list_recent_sessions, list_sessions, list_suggestions,
-        load_local_usage_stats, set_suggestion_status, LocalUsageStats, StoredPattern,
-        StoredRawEvent, StoredSession, StoredSuggestion, StoredSuggestionRecord,
+        list_suggestions_for_export, load_local_usage_stats, set_suggestion_status,
+        LocalUsageStats, StoredPattern, StoredRawEvent, StoredSession, StoredSuggestion,
+        StoredSuggestionForExport, StoredSuggestionRecord,
     },
 };
 use flow_dsl::{Action, AutomationSpec};
@@ -24,6 +28,7 @@ use flow_exec::{
     execute_automation, list_runs, preview_automation, preview_suggestion, undo_automation_run,
     AutomationPreview,
 };
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -67,6 +72,11 @@ Examples:
   flowctl dry-run 1
   flowctl run 1
   flowctl runs";
+
+const INTELLIGENCE_AFTER_HELP: &str = "\
+Examples:
+  flowctl intelligence export-feedback --output ./feedback-export.json
+  flowctl intelligence export-feedback --output ./feedback-export.json --generated-at 2026-03-13T12:00:00+00:00";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -124,7 +134,18 @@ enum Commands {
     },
     #[command(about = "List recent workflow sessions")]
     Sessions,
-    #[command(about = "Watch flowd activity as it is observed and inferred", visible_alias = "tail")]
+    #[command(
+        about = "Export local intelligence evaluation facts and feedback",
+        after_help = INTELLIGENCE_AFTER_HELP
+    )]
+    Intelligence {
+        #[command(subcommand)]
+        command: IntelligenceCommand,
+    },
+    #[command(
+        about = "Watch flowd activity as it is observed and inferred",
+        visible_alias = "tail"
+    )]
     Watch {
         #[arg(
             long = "category",
@@ -140,17 +161,11 @@ enum Commands {
         once: bool,
     },
     #[command(about = "Approve a suggestion into a deterministic automation")]
-    Approve {
-        suggestion_id: i64,
-    },
+    Approve { suggestion_id: i64 },
     #[command(about = "Reject a suggestion and hide it from pending results")]
-    Reject {
-        suggestion_id: i64,
-    },
+    Reject { suggestion_id: i64 },
     #[command(about = "Snooze a suggestion and hide it from pending results")]
-    Snooze {
-        suggestion_id: i64,
-    },
+    Snooze { suggestion_id: i64 },
     #[command(
         about = "List approved automations and inspect one in detail",
         after_help = AUTOMATIONS_AFTER_HELP
@@ -160,27 +175,17 @@ enum Commands {
         command: Option<AutomationsCommand>,
     },
     #[command(about = "Disable an automation without deleting it")]
-    Disable {
-        automation_id: i64,
-    },
+    Disable { automation_id: i64 },
     #[command(about = "Re-enable a disabled automation")]
-    Enable {
-        automation_id: i64,
-    },
+    Enable { automation_id: i64 },
     #[command(about = "Execute an automation against matching files")]
-    Run {
-        automation_id: i64,
-    },
+    Run { automation_id: i64 },
     #[command(about = "Preview an automation without changing files")]
-    DryRun {
-        automation_id: i64,
-    },
+    DryRun { automation_id: i64 },
     #[command(about = "List automation run history")]
     Runs,
     #[command(about = "Undo one completed automation run")]
-    Undo {
-        run_id: i64,
-    },
+    Undo { run_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -197,6 +202,17 @@ enum SuggestionsCommand {
 enum AutomationsCommand {
     #[command(about = "Show one automation with preview details")]
     Show { automation_id: i64 },
+}
+
+#[derive(Debug, Subcommand)]
+enum IntelligenceCommand {
+    #[command(about = "Export suggestion feedback and evaluation context to a local JSON file")]
+    ExportFeedback {
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, value_name = "RFC3339_TIMESTAMP", hide = true)]
+        generated_at: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -258,6 +274,12 @@ fn run() -> anyhow::Result<()> {
             None => render_suggestions_table(&context, explain)?,
         },
         Some(Commands::Sessions) => render_sessions(&context)?,
+        Some(Commands::Intelligence { command }) => match command {
+            IntelligenceCommand::ExportFeedback {
+                output,
+                generated_at,
+            } => export_feedback_command(&context, &output, generated_at.as_deref())?,
+        },
         Some(Commands::Watch {
             categories,
             poll_interval_ms,
@@ -418,7 +440,8 @@ fn render_setup_report(
 fn render_next_steps(steps: &[String]) -> Vec<String> {
     let mut lines = vec!["Next steps:".to_string()];
     lines.extend(
-        steps.iter()
+        steps
+            .iter()
             .enumerate()
             .map(|(index, step)| format!("{}. {step}", index + 1)),
     );
@@ -482,7 +505,9 @@ fn render_suggestions(context: &RuntimeContext, explain: bool) -> anyhow::Result
         return Ok(());
     }
 
-    let first_suggestion_id = suggestions.first().map(|result| result.suggestion.suggestion_id);
+    let first_suggestion_id = suggestions
+        .first()
+        .map(|result| result.suggestion.suggestion_id);
     mark_suggestions_displayed_from_results(&mut conn, &suggestions)?;
 
     for suggestion in suggestions {
@@ -578,7 +603,9 @@ fn render_suggestions_table(context: &RuntimeContext, explain: bool) -> anyhow::
         return Ok(());
     }
 
-    let first_suggestion_id = suggestions.first().map(|result| result.suggestion.suggestion_id);
+    let first_suggestion_id = suggestions
+        .first()
+        .map(|result| result.suggestion.suggestion_id);
     mark_suggestions_displayed_from_results(&mut conn, &suggestions)?;
     print_table(
         &suggestion_table_headers(explain),
@@ -696,6 +723,187 @@ fn render_sessions(context: &RuntimeContext) -> anyhow::Result<()> {
         .collect();
     print_table(&["id", "events", "duration", "start", "end"], &rows);
     Ok(())
+}
+
+const INTELLIGENCE_FEEDBACK_EXPORT_SCHEMA: &str = "flowd.intelligence_feedback_export";
+const INTELLIGENCE_FEEDBACK_EXPORT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct IntelligenceFeedbackExport {
+    schema_name: &'static str,
+    export_version: u32,
+    generated_at: String,
+    context: IntelligenceFeedbackExportContext,
+    suggestion_records: Vec<IntelligenceFeedbackSuggestionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct IntelligenceFeedbackExportContext {
+    reference_ts: Option<String>,
+    candidate_count: usize,
+    session_summary: InternalSessionSummary,
+    feedback_summary: InternalFeedbackSummary,
+    local_usage_stats: IntelligenceFeedbackLocalUsageStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct IntelligenceFeedbackLocalUsageStats {
+    pattern_count: usize,
+    suggestion_count: usize,
+    approved_automation_count: usize,
+    automation_run_count: usize,
+    undo_run_count: usize,
+    estimated_time_saved_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct IntelligenceFeedbackSuggestionRecord {
+    suggestion_id: i64,
+    pattern_signature: String,
+    status: String,
+    suggestion: IntelligenceFeedbackSuggestionMetadata,
+    feedback: InternalSuggestionHistory,
+    evaluation_context: IntelligenceFeedbackEvaluationContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct IntelligenceFeedbackSuggestionMetadata {
+    canonical_summary: String,
+    proposal_text: String,
+    usefulness_score: f64,
+    count: usize,
+    avg_duration_ms: i64,
+    freshness: String,
+    last_seen_at: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct IntelligenceFeedbackEvaluationContext {
+    pattern: InternalPatternMetadata,
+    recency: InternalRecencySignals,
+}
+
+fn export_feedback_command(
+    context: &RuntimeContext,
+    output_path: &Path,
+    generated_at: Option<&str>,
+) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let suggestions =
+        list_suggestions_for_export(&conn).context("failed to read suggestions for export")?;
+    let sessions = list_sessions(&conn).context("failed to read sessions for export")?;
+    let usage_stats =
+        load_local_usage_stats(&conn).context("failed to read local usage stats for export")?;
+    let generated_at = generated_at
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|timestamp| timestamp.to_rfc3339())
+                .with_context(|| format!("failed to parse generated timestamp {value} as RFC3339"))
+        })
+        .transpose()?
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let export =
+        build_intelligence_feedback_export(suggestions, &sessions, &usage_stats, generated_at);
+    let json = serde_json::to_string_pretty(&export)
+        .context("failed to serialize intelligence feedback export")?;
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create export directory {}", parent.display())
+            })?;
+        }
+    }
+    fs::write(output_path, format!("{json}\n"))
+        .with_context(|| format!("failed to write export to {}", output_path.display()))?;
+
+    println!(
+        "Exported {} suggestion records to {}",
+        export.suggestion_records.len(),
+        output_path.display()
+    );
+    Ok(())
+}
+
+fn build_intelligence_feedback_export(
+    suggestions: Vec<StoredSuggestionForExport>,
+    sessions: &[StoredSession],
+    usage_stats: &LocalUsageStats,
+    generated_at: String,
+) -> IntelligenceFeedbackExport {
+    let stored_suggestions: Vec<_> = suggestions
+        .iter()
+        .map(StoredSuggestionForExport::as_stored_suggestion)
+        .collect();
+    let contexts = map_stored_suggestions_to_contexts(&stored_suggestions);
+    let envelope =
+        build_envelope_from_contexts(&contexts, Some(summarize_stored_sessions(sessions)));
+
+    let suggestion_records = suggestions
+        .into_iter()
+        .zip(envelope.candidates)
+        .map(
+            |(suggestion, context)| IntelligenceFeedbackSuggestionRecord {
+                suggestion_id: suggestion.suggestion_id,
+                pattern_signature: suggestion.signature,
+                status: suggestion.status,
+                suggestion: IntelligenceFeedbackSuggestionMetadata {
+                    canonical_summary: suggestion.canonical_summary,
+                    proposal_text: suggestion.proposal_text,
+                    usefulness_score: suggestion.usefulness_score,
+                    count: suggestion.count,
+                    avg_duration_ms: suggestion.avg_duration_ms,
+                    freshness: suggestion.freshness,
+                    last_seen_at: suggestion.last_seen_at,
+                    created_at: suggestion.created_at,
+                },
+                feedback: context.history,
+                evaluation_context: IntelligenceFeedbackEvaluationContext {
+                    pattern: context.pattern,
+                    recency: context.recency,
+                },
+            },
+        )
+        .collect();
+
+    IntelligenceFeedbackExport {
+        schema_name: INTELLIGENCE_FEEDBACK_EXPORT_SCHEMA,
+        export_version: INTELLIGENCE_FEEDBACK_EXPORT_VERSION,
+        generated_at,
+        context: IntelligenceFeedbackExportContext {
+            reference_ts: envelope.context.reference_ts,
+            candidate_count: envelope.context.candidate_count,
+            session_summary: envelope.context.session_summary,
+            feedback_summary: envelope.context.feedback_summary,
+            local_usage_stats: IntelligenceFeedbackLocalUsageStats {
+                pattern_count: usage_stats.pattern_count,
+                suggestion_count: usage_stats.suggestion_count,
+                approved_automation_count: usage_stats.approved_automation_count,
+                automation_run_count: usage_stats.automation_run_count,
+                undo_run_count: usage_stats.undo_run_count,
+                estimated_time_saved_ms: usage_stats.estimated_time_saved_ms,
+            },
+        },
+        suggestion_records,
+    }
+}
+
+fn summarize_stored_sessions(sessions: &[StoredSession]) -> InternalSessionSummary {
+    if sessions.is_empty() {
+        return InternalSessionSummary::default();
+    }
+
+    let total_duration_ms: i64 = sessions.iter().map(|session| session.duration_ms).sum();
+    let total_events: usize = sessions.iter().map(|session| session.event_count).sum();
+    let latest_session_end_ts = sessions.iter().map(|session| session.end_ts.clone()).max();
+
+    InternalSessionSummary {
+        total_sessions: sessions.len(),
+        avg_session_duration_ms: total_duration_ms / sessions.len() as i64,
+        avg_events_per_session: total_events / sessions.len(),
+        latest_session_end_ts,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -816,8 +1024,8 @@ fn collect_watch_lines(
     let mut lines = Vec::new();
 
     if categories.contains(&WatchCategory::Events) {
-        let raw_events =
-            list_raw_events_after(conn, state.last_raw_event_id).context("failed to read raw events")?;
+        let raw_events = list_raw_events_after(conn, state.last_raw_event_id)
+            .context("failed to read raw events")?;
         if let Some(last) = raw_events.last() {
             state.last_raw_event_id = last.id;
         }
@@ -1811,6 +2019,35 @@ mod tests {
         }
     }
 
+    fn stored_suggestion_for_export(
+        suggestion_id: i64,
+        signature: &str,
+        usefulness_score: f64,
+    ) -> StoredSuggestionForExport {
+        StoredSuggestionForExport {
+            suggestion_id,
+            status: "pending".to_string(),
+            pattern_id: suggestion_id,
+            signature: signature.to_string(),
+            count: 2,
+            avg_duration_ms: 10_000,
+            canonical_summary: "CreateFile -> RenameFile".to_string(),
+            proposal_text: format!("Proposal for {signature}"),
+            usefulness_score,
+            freshness: "current".to_string(),
+            last_seen_at: "2026-01-15T10:00:00+00:00".to_string(),
+            created_at: "2026-01-15T09:00:00+00:00".to_string(),
+            shown_count: 3,
+            accepted_count: 1,
+            rejected_count: 1,
+            snoozed_count: 0,
+            last_shown_ts: Some("2026-01-15T10:30:00+00:00".to_string()),
+            last_accepted_ts: Some("2026-01-15T10:31:00+00:00".to_string()),
+            last_rejected_ts: Some("2026-01-15T10:32:00+00:00".to_string()),
+            last_snoozed_ts: None,
+        }
+    }
+
     #[test]
     fn display_ranking_uses_intelligence_when_available() {
         let suggestions = vec![
@@ -2233,6 +2470,93 @@ mod tests {
             render_watch_pattern_updated(&previous, &pattern),
             "[pattern] candidate strengthened: invoice_workflow (repetitions: 4)"
         );
+    }
+
+    #[test]
+    fn intelligence_feedback_export_is_deterministic_and_versioned() {
+        let export = build_intelligence_feedback_export(
+            vec![
+                stored_suggestion_for_export(1, "CreateFile:invoice-a", 0.9),
+                stored_suggestion_for_export(2, "CreateFile:invoice-b", 0.8),
+            ],
+            &[StoredSession {
+                session_id: 1,
+                start_ts: "2026-01-15T09:00:00+00:00".to_string(),
+                end_ts: "2026-01-15T10:00:00+00:00".to_string(),
+                event_count: 4,
+                duration_ms: 3_600_000,
+            }],
+            &LocalUsageStats {
+                pattern_count: 2,
+                suggestion_count: 2,
+                approved_automation_count: 1,
+                automation_run_count: 3,
+                undo_run_count: 1,
+                estimated_time_saved_ms: 20_000,
+            },
+            "2026-03-13T12:00:00+00:00".to_string(),
+        );
+
+        let json = serde_json::to_string_pretty(&export).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            value["schema_name"],
+            Value::String("flowd.intelligence_feedback_export".to_string())
+        );
+        assert_eq!(value["export_version"], Value::Number(1.into()));
+        assert_eq!(
+            value["generated_at"],
+            Value::String("2026-03-13T12:00:00+00:00".to_string())
+        );
+        assert_eq!(value["context"]["candidate_count"], Value::Number(2.into()));
+        assert_eq!(
+            value["context"]["feedback_summary"]["shown_count"],
+            Value::Number(6.into())
+        );
+        assert_eq!(
+            value["suggestion_records"][0]["pattern_signature"],
+            Value::String("CreateFile:invoice-a".to_string())
+        );
+        assert_eq!(
+            value["suggestion_records"][0]["evaluation_context"]["recency"]
+                ["seconds_since_last_rejected"],
+            Value::Number(0.into())
+        );
+        assert_eq!(
+            value["suggestion_records"][1]["suggestion"]["proposal_text"],
+            Value::String("Proposal for CreateFile:invoice-b".to_string())
+        );
+    }
+
+    #[test]
+    fn intelligence_feedback_export_empty_state_is_stable() {
+        let export = build_intelligence_feedback_export(
+            Vec::new(),
+            &[],
+            &LocalUsageStats {
+                pattern_count: 0,
+                suggestion_count: 0,
+                approved_automation_count: 0,
+                automation_run_count: 0,
+                undo_run_count: 0,
+                estimated_time_saved_ms: 0,
+            },
+            "2026-03-13T12:00:00+00:00".to_string(),
+        );
+
+        assert_eq!(export.schema_name, "flowd.intelligence_feedback_export");
+        assert_eq!(export.export_version, 1);
+        assert_eq!(export.context.candidate_count, 0);
+        assert_eq!(
+            export.context.session_summary,
+            InternalSessionSummary::default()
+        );
+        assert_eq!(
+            export.context.feedback_summary,
+            InternalFeedbackSummary::default()
+        );
+        assert!(export.suggestion_records.is_empty());
     }
 
     fn sample_preview() -> AutomationPreview {

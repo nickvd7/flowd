@@ -61,6 +61,56 @@ pub struct StoredSuggestionRecord {
     pub last_snoozed_ts: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSuggestionForExport {
+    pub suggestion_id: i64,
+    pub status: String,
+    pub pattern_id: i64,
+    pub signature: String,
+    pub count: usize,
+    pub avg_duration_ms: i64,
+    pub canonical_summary: String,
+    pub proposal_text: String,
+    pub usefulness_score: f64,
+    pub freshness: String,
+    pub last_seen_at: String,
+    pub created_at: String,
+    pub shown_count: u32,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub snoozed_count: u32,
+    pub last_shown_ts: Option<String>,
+    pub last_accepted_ts: Option<String>,
+    pub last_rejected_ts: Option<String>,
+    pub last_snoozed_ts: Option<String>,
+}
+
+impl StoredSuggestionForExport {
+    pub fn as_stored_suggestion(&self) -> StoredSuggestion {
+        StoredSuggestion {
+            suggestion_id: self.suggestion_id,
+            pattern_id: self.pattern_id,
+            signature: self.signature.clone(),
+            count: self.count,
+            avg_duration_ms: self.avg_duration_ms,
+            canonical_summary: self.canonical_summary.clone(),
+            proposal_text: self.proposal_text.clone(),
+            usefulness_score: self.usefulness_score,
+            freshness: self.freshness.clone(),
+            last_seen_at: self.last_seen_at.clone(),
+            created_at: self.created_at.clone(),
+            shown_count: self.shown_count,
+            accepted_count: self.accepted_count,
+            rejected_count: self.rejected_count,
+            snoozed_count: self.snoozed_count,
+            last_shown_ts: self.last_shown_ts.clone(),
+            last_accepted_ts: self.last_accepted_ts.clone(),
+            last_rejected_ts: self.last_rejected_ts.clone(),
+            last_snoozed_ts: self.last_snoozed_ts.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SuggestionDetails {
     pub suggestion_id: i64,
@@ -911,6 +961,79 @@ pub fn list_all_suggestion_records(
             last_accepted_ts: row.get(11)?,
             last_rejected_ts: row.get(12)?,
             last_snoozed_ts: row.get(13)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn list_suggestions_for_export(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<StoredSuggestionForExport>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            suggestions.id,
+            suggestions.status,
+            patterns.id,
+            patterns.signature,
+            patterns.count,
+            patterns.avg_duration_ms,
+            COALESCE(patterns.canonical_summary, ''),
+            suggestions.proposal_json,
+            suggestions.usefulness_score,
+            suggestions.freshness,
+            COALESCE(patterns.last_seen_at, ''),
+            suggestions.created_at,
+            suggestions.shown_count,
+            suggestions.accepted_count,
+            suggestions.rejected_count,
+            suggestions.snoozed_count,
+            suggestions.last_shown_ts,
+            suggestions.last_accepted_ts,
+            suggestions.last_rejected_ts,
+            suggestions.last_snoozed_ts
+        FROM suggestions
+        INNER JOIN patterns ON patterns.id = suggestions.pattern_id
+        ORDER BY suggestions.id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        let proposal_json: String = row.get(7)?;
+        let proposal: Value = serde_json::from_str(&proposal_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                proposal_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+
+        Ok(StoredSuggestionForExport {
+            suggestion_id: row.get(0)?,
+            status: row.get(1)?,
+            pattern_id: row.get(2)?,
+            signature: row.get(3)?,
+            count: row.get::<_, i64>(4)? as usize,
+            avg_duration_ms: row.get(5)?,
+            canonical_summary: row.get(6)?,
+            proposal_text: proposal
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            usefulness_score: row.get(8)?,
+            freshness: row.get(9)?,
+            last_seen_at: row.get(10)?,
+            created_at: row.get(11)?,
+            shown_count: row.get::<_, i64>(12)? as u32,
+            accepted_count: row.get::<_, i64>(13)? as u32,
+            rejected_count: row.get::<_, i64>(14)? as u32,
+            snoozed_count: row.get::<_, i64>(15)? as u32,
+            last_shown_ts: row.get(16)?,
+            last_accepted_ts: row.get(17)?,
+            last_rejected_ts: row.get(18)?,
+            last_snoozed_ts: row.get(19)?,
         })
     })?;
 

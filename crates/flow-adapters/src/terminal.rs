@@ -142,8 +142,15 @@ struct CommandSegmentSignal {
 }
 
 fn classify_command_segment(cwd: &str, tokens: &[String]) -> CommandSegmentSignal {
-    let command_name = tokens.first().map(|value| value.as_str()).unwrap_or("command");
-    let args = if tokens.is_empty() { &[][..] } else { &tokens[1..] };
+    let command_name = tokens
+        .first()
+        .map(|value| value.as_str())
+        .unwrap_or("command");
+    let args = if tokens.is_empty() {
+        &[][..]
+    } else {
+        &tokens[1..]
+    };
     let path_args = collect_path_args(command_name, args);
 
     match command_name {
@@ -176,7 +183,11 @@ fn aggregate_segment_signals(segments: Vec<CommandSegmentSignal>) -> TerminalSig
         extend_unique(&mut target_paths, segment.target_paths.iter().cloned());
     }
 
-    for path in source_paths.iter().chain(target_paths.iter()).chain(paths.iter()) {
+    for path in source_paths
+        .iter()
+        .chain(target_paths.iter())
+        .chain(paths.iter())
+    {
         push_unique(&mut directory_structures, directory_structure(path));
     }
 
@@ -686,7 +697,10 @@ mod tests {
         assert_eq!(raw.payload["kind"], "copy");
         assert_eq!(raw.payload["command_sequence_pattern"], "mkdir>copy");
         assert_eq!(raw.payload["command_count"], 2);
-        assert_eq!(raw.payload["source_paths"][0], "/tmp/workspace/inbox/report.txt");
+        assert_eq!(
+            raw.payload["source_paths"][0],
+            "/tmp/workspace/inbox/report.txt"
+        );
         assert_eq!(
             raw.payload["target_paths"][0],
             "/tmp/workspace/review/2026/03"
@@ -711,8 +725,14 @@ mod tests {
 
         assert_eq!(raw.payload["kind"], "move");
         assert_eq!(raw.payload["command_sequence_pattern"], "mkdir>move");
-        assert_eq!(raw.payload["command_kinds"], serde_json::json!(["mkdir", "move"]));
-        assert_eq!(raw.payload["path"], "/tmp/workspace/archive/reports/report.txt");
+        assert_eq!(
+            raw.payload["command_kinds"],
+            serde_json::json!(["mkdir", "move"])
+        );
+        assert_eq!(
+            raw.payload["path"],
+            "/tmp/workspace/archive/reports/report.txt"
+        );
         assert_eq!(raw.payload["from_path"], "/tmp/workspace/inbox/draft.txt");
     }
 }

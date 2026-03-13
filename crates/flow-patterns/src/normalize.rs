@@ -388,7 +388,10 @@ mod tests {
         );
         assert_eq!(event.metadata["command_sequence_pattern"], "mkdir>copy");
         assert_eq!(event.metadata["command_count"], 2);
-        assert_eq!(event.metadata["target_paths"][0], "/tmp/workspace/review/2026/03");
+        assert_eq!(
+            event.metadata["target_paths"][0],
+            "/tmp/workspace/review/2026/03"
+        );
         assert!(event.metadata["directory_structures"]
             .as_array()
             .unwrap()
