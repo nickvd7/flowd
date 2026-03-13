@@ -2,7 +2,7 @@
 
 flowd follows a **terminal-first, local-first architecture** where workflow discovery and automation logic run locally.
 
-For the canonical high-level system description, repository ownership split, and integration flow, start with [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md).
+For the canonical high-level system description, repository ownership split, and integration flow, start with [System Overview](system-overview.md).
 
 ## Pipeline layers
 

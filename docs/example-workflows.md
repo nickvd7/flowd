@@ -11,7 +11,7 @@ These examples stay within the current open-core scope:
 
 The examples below are not promises of broad desktop automation. They show the kinds of repeated file workflows `flowd` can realistically detect and turn into safe suggestions.
 
-Canonical replay fixtures for the strongest examples live in [`fixtures/demo_scenarios/manifest.json`](/Users/nickvandort/Documents/Coding/flowd/fixtures/demo_scenarios/manifest.json). They are intended to stay aligned with these examples for docs, demos, and regression tests.
+Canonical replay fixtures for the strongest examples live in [`fixtures/demo_scenarios/manifest.json`](../fixtures/demo_scenarios/manifest.json). They are intended to stay aligned with these examples for docs, demos, and regression tests.
 
 ## 1. Organizing invoices from Downloads
 

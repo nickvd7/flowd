@@ -4,7 +4,9 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Local-first](https://img.shields.io/badge/local--first-yes-green)
 
-Workflow automation that learns from how you work.
+Local-first, terminal-first workflow automation for repeated file workflows.
+
+> Status: upcoming `v0.2` pre-release. The project is usable for local evaluation and demos, but it is still pre-release software.
 
 flowd observes local file workflows, detects repeated patterns, and suggests automations you can approve from the terminal.
 
@@ -12,10 +14,14 @@ flowd observes local file workflows, detects repeated patterns, and suggests aut
 - Terminal-first
 - Deterministic automations
 - Safe approvals with undo
+- Explainable suggestions
+- Local history and usage stats
 
 ## What is flowd?
 
-flowd solves a simple problem: many file workflows are repetitive, but writing automation rules by hand is tedious. It watches local activity, recognizes repeated sequences such as rename and move actions, and turns them into suggestions you can inspect before anything is automated. Approved automations run locally, and the system remains useful without any cloud service or separate intelligence layer.
+flowd solves a simple problem: many file workflows are repetitive, but writing automation rules by hand is tedious. It watches local activity, recognizes repeated sequences such as rename and move actions, and turns them into suggestions you can inspect before anything is automated.
+
+The current implementation is focused on deterministic, file-oriented workflows. It includes filesystem observation, terminal, clipboard, and browser download adapters, suggestion explainability, suggestion history, local usage stats, first-run onboarding, and approval-driven execution with undo. Approved automations run locally, and the system remains useful without any cloud service or separate intelligence layer.
 
 ## Demo
 
@@ -42,24 +48,23 @@ Approved suggestion 3 as automation 1
 
 After approval, future matching files can be handled by the generated automation instead of repeating the same manual steps.
 
-For more realistic cases, see [docs/example-workflows.md](/Users/nickvandort/Documents/Coding/flowd/docs/example-workflows.md).
+For more realistic cases, see [Example Workflows](docs/example-workflows.md).
 
 ## Installation
 
-### Install with cargo
+### Install from source
 
-If you are using a packaged release, install flowd with:
-
-```bash
-cargo install flowd
-```
-
-In this repository today, install the local binaries directly:
+The `v0.2` pre-release is currently documented for source installs from this repository. You need a stable Rust toolchain.
 
 ```bash
 cargo install --path crates/flow-cli
 cargo install --path crates/flow-daemon
 ```
+
+This installs:
+
+- `flowctl` for setup, inspection, approvals, and execution
+- `flow-daemon` for local observation and analysis refresh
 
 ### First-run setup
 
@@ -86,12 +91,6 @@ If the config already exists, `flowctl setup` will leave it unchanged unless you
 ### Start the daemon
 
 The daemon starts workflow observation and, by default, watches `~/Downloads`. It stores state locally in `./flowd.db`.
-
-```bash
-flow-daemon
-```
-
-From this repository, the current daemon binary is:
 
 ```bash
 flow-daemon
@@ -135,34 +134,30 @@ flowctl config validate
 flowctl config path
 ```
 
-### Inspect suggestions
-
-```bash
-flowctl suggestions
-```
-
-### Approve an automation
-
-```bash
-flowctl approve <id>
-```
-
 ## Usage
 
 The core loop is:
 
 ```text
-observe -> detect patterns -> suggest automations -> approve
+observe -> detect patterns -> suggest automations -> inspect -> approve -> dry-run -> run -> undo
 ```
 
 Useful commands:
 
 ```bash
+flowctl config show
 flowctl stats
 flowctl patterns
+flowctl sessions
 flowctl suggestions
+flowctl suggestions --explain
+flowctl suggestions explain <suggestion_id>
+flowctl suggestions history
 flowctl approve <suggestion_id>
+flowctl reject <suggestion_id>
+flowctl snooze <suggestion_id>
 flowctl automations
+flowctl automations show <automation_id>
 flowctl dry-run <automation_id>
 flowctl run <automation_id>
 flowctl runs
@@ -223,7 +218,7 @@ flow-dsl         automation specification
 flow-exec        dry-run and execution
 ```
 
-For more detail, see [docs/system-overview.md](/Users/nickvandort/Documents/Coding/flowd/docs/system-overview.md) and [docs/architecture.md](/Users/nickvandort/Documents/Coding/flowd/docs/architecture.md).
+For more detail, see [System Overview](docs/system-overview.md), [Architecture](docs/architecture.md), and [Architecture Diagram](docs/architecture-diagram.md).
 
 ## Project principles
 
@@ -246,13 +241,6 @@ Automation focuses on explicit approval, dry runs, execution tracking, and undo.
 ## Language policy
 
 All documentation, code comments, commit messages, issue discussions, and contributor-facing text must be written in English.
-
-## Included planning files
-
-- `PLAN.md`
-- `TASKS.md`
-- `PROMPTS_FOR_CODEX.md`
-- `PRIVATE_CORE_BOUNDARY.md`
 
 ## Roadmap
 
