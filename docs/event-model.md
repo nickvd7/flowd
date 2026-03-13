@@ -10,6 +10,13 @@ Common sources:
 - active window
 - browser bridge
 
+Browser download bridge payloads should stay metadata-first:
+- filename
+- extension
+- browser when safely available
+- source URL and page URL with query strings stripped by default
+- download start timing and duration
+
 Suggested fields:
 - timestamp
 - source

@@ -52,6 +52,8 @@ pub struct Config {
     pub database_path: String,
     pub observed_folders: Vec<String>,
     pub observe_clipboard: bool,
+    pub observe_browser_downloads: bool,
+    pub browser_downloads_bridge_path: String,
     pub observe_terminal: bool,
     pub observe_active_window: bool,
     pub redact_clipboard_content: bool,
@@ -72,6 +74,8 @@ impl Default for Config {
             database_path: "./flowd.db".to_string(),
             observed_folders: vec!["~/Downloads".to_string()],
             observe_clipboard: false,
+            observe_browser_downloads: false,
+            browser_downloads_bridge_path: "~/.flowd/browser-downloads.ndjson".to_string(),
             observe_terminal: true,
             observe_active_window: false,
             redact_clipboard_content: true,
@@ -130,6 +134,13 @@ impl Config {
         if self.observed_folders.is_empty() {
             return Err(FlowError::Validation(
                 "observed_folders must contain at least one path".to_string(),
+            ));
+        }
+
+        if self.observe_browser_downloads && self.browser_downloads_bridge_path.trim().is_empty() {
+            return Err(FlowError::Validation(
+                "browser_downloads_bridge_path must not be empty when browser download observation is enabled"
+                    .to_string(),
             ));
         }
 
@@ -322,6 +333,11 @@ mod tests {
         assert!(cfg.intelligence_enabled);
         assert_eq!(cfg.session_inactivity_secs, 300);
         assert_eq!(cfg.file_event_dedup_window_ms, 500);
+        assert!(!cfg.observe_browser_downloads);
+        assert_eq!(
+            cfg.browser_downloads_bridge_path,
+            "~/.flowd/browser-downloads.ndjson"
+        );
         assert_eq!(
             cfg.clipboard_capture_mode(),
             ClipboardCaptureMode::MetadataOnly
@@ -346,6 +362,7 @@ observed_folders = ["~/Inbox"]
         assert_eq!(cfg.database_path, "./custom.db");
         assert_eq!(cfg.observed_folders, vec!["~/Inbox".to_string()]);
         assert!(!cfg.observe_clipboard);
+        assert!(!cfg.observe_browser_downloads);
         assert!(cfg.observe_terminal);
         assert_eq!(cfg.suggestion_min_usefulness_score, 0.0);
     }
@@ -394,6 +411,25 @@ observed_folders = ["~/Inbox"]
             r#"
 database_path = "./flowd.db"
 observed_folders = []
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load_from_path(&path).unwrap_err();
+        assert!(matches!(error, FlowError::Validation(_)));
+    }
+
+    #[test]
+    fn browser_download_observation_requires_bridge_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("flowd.toml");
+        fs::write(
+            &path,
+            r#"
+database_path = "./flowd.db"
+observed_folders = ["~/Downloads"]
+observe_browser_downloads = true
+browser_downloads_bridge_path = "   "
 "#,
         )
         .unwrap();
