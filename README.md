@@ -59,12 +59,34 @@ cargo install --path crates/flow-cli
 cargo install --path crates/flow-daemon
 ```
 
+### First-run setup
+
+Create a config file and print the next commands to run:
+
+```bash
+flowctl setup
+```
+
+To pick the folders you want `flow-daemon` to watch from the start:
+
+```bash
+flowctl setup --watch ~/Downloads --watch ~/Desktop
+```
+
+If you want to write the config to a specific location, combine `setup` with `--config`:
+
+```bash
+flowctl --config ~/.config/flowd/config.toml setup --watch ~/Downloads
+```
+
+If the config already exists, `flowctl setup` will leave it unchanged unless you pass `--force`.
+
 ### Start the daemon
 
 The daemon starts workflow observation and, by default, watches `~/Downloads`. It stores state locally in `./flowd.db`.
 
 ```bash
-flowd daemon start
+flow-daemon
 ```
 
 From this repository, the current daemon binary is:

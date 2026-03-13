@@ -5,7 +5,9 @@ use flow_analysis::intelligence_boundary::{
     ExplainabilitySource, IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient,
     SuggestionDecisionAction, SuggestionDisplayResult, SuggestionExplainability,
 };
-use flow_core::config::{expand_home, Config, ConfigSource, LoadedConfig};
+use flow_core::config::{
+    expand_home, preferred_setup_config_path, Config, ConfigSource, LoadedConfig,
+};
 use flow_db::{
     open_database,
     repo::{
@@ -21,7 +23,11 @@ use flow_exec::{
     AutomationPreview,
 };
 use serde_json::Value;
-use std::{fmt::Display, path::PathBuf};
+use std::{
+    fmt::Display,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "flowctl", version, about = "CLI for flowd")]
@@ -35,6 +41,12 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Status,
+    Setup {
+        #[arg(long = "watch", value_name = "PATH")]
+        watch: Vec<String>,
+        #[arg(long)]
+        force: bool,
+    },
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
@@ -114,12 +126,18 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Commands::Setup { watch, force }) = &cli.command {
+        return setup_command(cli.config.as_deref(), watch, *force);
+    }
+
     let context = RuntimeContext {
         loaded_config: load_runtime_config(cli.config.as_deref())?,
     };
 
     match cli.command {
         Some(Commands::Status) => println!("flowd status: template skeleton"),
+        Some(Commands::Setup { .. }) => unreachable!("setup is handled before runtime config"),
         Some(Commands::Config { command }) => render_config_command(&context, command)?,
         Some(Commands::Patterns) => render_patterns(&context)?,
         Some(Commands::Suggest { explain }) => render_suggestions(&context, explain)?,
@@ -162,6 +180,145 @@ fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupAction {
+    Created,
+    Updated,
+    Unchanged,
+}
+
+fn setup_command(
+    explicit_config_path: Option<&Path>,
+    watch: &[String],
+    force: bool,
+) -> anyhow::Result<()> {
+    let target_path = explicit_config_path
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(preferred_setup_config_path)
+        .map_err(anyhow::Error::from)?;
+    let existing_config = if target_path.is_file() {
+        Some(Config::load_from_path(&target_path).with_context(|| {
+            format!(
+                "failed to load existing config at {}",
+                target_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+
+    let desired_config = build_setup_config(existing_config.clone(), watch);
+    let action = if existing_config.is_none() {
+        write_setup_config(&target_path, &desired_config)?;
+        SetupAction::Created
+    } else if force {
+        write_setup_config(&target_path, &desired_config)?;
+        SetupAction::Updated
+    } else {
+        SetupAction::Unchanged
+    };
+
+    let reported_config = if action == SetupAction::Unchanged {
+        existing_config
+            .as_ref()
+            .expect("existing config must be available when setup is unchanged")
+    } else {
+        &desired_config
+    };
+
+    for line in render_setup_report(
+        action,
+        &target_path,
+        reported_config,
+        !watch.is_empty() && existing_config.is_some() && !force,
+    ) {
+        println!("{line}");
+    }
+
+    Ok(())
+}
+
+fn build_setup_config(existing_config: Option<Config>, watch: &[String]) -> Config {
+    let mut config = existing_config.unwrap_or_default();
+    if !watch.is_empty() {
+        config.observed_folders = watch.to_vec();
+    }
+    config
+}
+
+fn write_setup_config(path: &Path, config: &Config) -> anyhow::Result<()> {
+    config.validate()?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+
+    fs::write(path, config.to_pretty_toml()?)
+        .with_context(|| format!("failed to write config to {}", path.display()))?;
+    Ok(())
+}
+
+fn render_setup_report(
+    action: SetupAction,
+    config_path: &Path,
+    config: &Config,
+    skipped_watch_update: bool,
+) -> Vec<String> {
+    let flowctl_prefix = format!("flowctl --config {}", shell_quote(config_path));
+    let daemon_command = format!("flow-daemon --config {}", shell_quote(config_path));
+    let mut lines = vec![
+        match action {
+            SetupAction::Created => format!("Created config: {}", config_path.display()),
+            SetupAction::Updated => format!("Updated config: {}", config_path.display()),
+            SetupAction::Unchanged => format!("Config already exists: {}", config_path.display()),
+        },
+        format!("Observed folders: {}", config.observed_folders.join(", ")),
+    ];
+
+    if action == SetupAction::Unchanged {
+        lines.push("No changes were made.".to_string());
+    }
+
+    if skipped_watch_update {
+        lines.push(
+            "Requested watched paths were not applied. Re-run with --force to rewrite the config."
+                .to_string(),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("Next steps:".to_string());
+    lines.push(format!("1. Start the daemon: {daemon_command}"));
+    lines.push(format!(
+        "2. Inspect suggestions: {flowctl_prefix} suggestions"
+    ));
+    lines.push(format!(
+        "3. Approve an automation: {flowctl_prefix} approve <suggestion_id>"
+    ));
+    lines.push(format!(
+        "4. Inspect generated config: {flowctl_prefix} config show"
+    ));
+
+    lines
+}
+
+fn shell_quote(path: &Path) -> String {
+    let rendered = path.display().to_string();
+    if rendered
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.' | '~'))
+    {
+        return rendered;
+    }
+
+    format!(
+        "\"{}\"",
+        rendered.replace('\\', "\\\\").replace('"', "\\\"")
+    )
 }
 
 fn render_config_command(
