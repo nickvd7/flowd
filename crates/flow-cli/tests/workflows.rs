@@ -4,9 +4,9 @@ use flow_analysis::refresh_analysis_state;
 use flow_db::{
     migrations::run_migrations,
     repo::{
-        get_automation, insert_normalized_event_record, insert_raw_event, list_automations,
-        list_normalized_events, list_patterns, list_pending_file_raw_events, list_recent_sessions,
-        list_suggestions,
+        get_automation, insert_normalized_event_record, insert_raw_event,
+        list_all_suggestion_records, list_automations, list_normalized_events, list_patterns,
+        list_pending_file_raw_events, list_recent_sessions, list_suggestions,
     },
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
@@ -129,6 +129,107 @@ fn suggestions_explain_renders_explanation_column() {
     assert!(stdout.contains(
         "Open-core baseline order and wording were used because intelligence was unavailable."
     ));
+}
+
+#[test]
+fn suggestions_history_renders_deterministic_feedback_table() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let reject = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["reject", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(reject.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["suggestions", "history"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let conn = Connection::open(&db_path).unwrap();
+    let rows: Vec<Vec<String>> = list_all_suggestion_records(&conn)
+        .unwrap()
+        .into_iter()
+        .map(|suggestion| {
+            let latest = render_latest_interaction(&suggestion);
+            vec![
+                suggestion.suggestion_id.to_string(),
+                suggestion.status,
+                render_pattern_name(&suggestion.signature),
+                suggestion.shown_count.to_string(),
+                suggestion.accepted_count.to_string(),
+                suggestion.rejected_count.to_string(),
+                suggestion.snoozed_count.to_string(),
+                latest,
+                suggestion.proposal_text,
+            ]
+        })
+        .collect();
+    let expected = format_table(
+        &[
+            "id",
+            "status",
+            "pattern",
+            "shown",
+            "accepted",
+            "rejected",
+            "snoozed",
+            "latest",
+            "description",
+        ],
+        &rows,
+    );
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn suggestions_show_renders_history_details() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let snooze = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["snooze", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(snooze.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["suggestions", "show", "1"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let conn = Connection::open(&db_path).unwrap();
+    let suggestion = list_all_suggestion_records(&conn).unwrap().remove(0);
+    let expected = format_suggestion_history_report(&suggestion);
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn suggestions_show_reports_missing_suggestion() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("flowd.db");
+    seed_database(&db_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["suggestions", "show", "999"])
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("suggestion 999 not found"));
 }
 
 #[test]
@@ -1053,6 +1154,58 @@ fn format_automation_report(
     format!("{}\n", lines.join("\n"))
 }
 
+fn format_suggestion_history_report(suggestion: &flow_db::repo::StoredSuggestionRecord) -> String {
+    let lines = vec![
+        format!("suggestion: {}", suggestion.suggestion_id),
+        format!("status: {}", suggestion.status),
+        format!("pattern: {}", suggestion.canonical_summary),
+        format!("signature: {}", suggestion.signature),
+        format!("proposal: {}", suggestion.proposal_text),
+        format!(
+            "feedback: shown={}, accepted={}, rejected={}, snoozed={}",
+            suggestion.shown_count,
+            suggestion.accepted_count,
+            suggestion.rejected_count,
+            suggestion.snoozed_count
+        ),
+        format!("latest: {}", render_latest_interaction(suggestion)),
+        format!(
+            "last_shown: {}",
+            suggestion
+                .last_shown_ts
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        format!(
+            "last_accepted: {}",
+            suggestion
+                .last_accepted_ts
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        format!(
+            "last_rejected: {}",
+            suggestion
+                .last_rejected_ts
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "-".to_string())
+        ),
+        format!(
+            "last_snoozed: {}",
+            suggestion
+                .last_snoozed_ts
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "-".to_string())
+        ),
+    ];
+
+    format!("{}\n", lines.join("\n"))
+}
+
 fn render_automation_preview(preview: &flow_exec::AutomationPreview) -> Vec<String> {
     let mut lines = vec![
         "Automation preview".to_string(),
@@ -1195,6 +1348,20 @@ fn render_action_label(action: &str) -> String {
     }
 
     label
+}
+
+fn render_latest_interaction(suggestion: &flow_db::repo::StoredSuggestionRecord) -> String {
+    [
+        ("shown", suggestion.last_shown_ts.as_deref()),
+        ("accepted", suggestion.last_accepted_ts.as_deref()),
+        ("rejected", suggestion.last_rejected_ts.as_deref()),
+        ("snoozed", suggestion.last_snoozed_ts.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| value.map(|timestamp| (label, timestamp)))
+    .max_by(|left, right| left.1.cmp(right.1))
+    .map(|(label, timestamp)| format!("{label} {}", format_timestamp(timestamp)))
+    .unwrap_or_else(|| "-".to_string())
 }
 
 fn render_action_details(action: &Action) -> String {

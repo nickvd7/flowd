@@ -12,8 +12,8 @@ use flow_db::{
     open_database,
     repo::{
         get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
-        list_automations, list_patterns, list_recent_sessions, list_suggestions,
-        set_suggestion_status, StoredSuggestion,
+        list_all_suggestion_records, list_automations, list_patterns, list_recent_sessions,
+        list_suggestions, set_suggestion_status, StoredSuggestion, StoredSuggestionRecord,
     },
 };
 use flow_dsl::{Action, AutomationSpec};
@@ -98,6 +98,8 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum SuggestionsCommand {
     Explain { suggestion_id: i64 },
+    History,
+    Show { suggestion_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -144,6 +146,10 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Suggestions { command, explain }) => match command {
             Some(SuggestionsCommand::Explain { suggestion_id }) => {
                 explain_suggestion_command(&context, suggestion_id)?
+            }
+            Some(SuggestionsCommand::History) => render_suggestion_history(&context)?,
+            Some(SuggestionsCommand::Show { suggestion_id }) => {
+                show_suggestion_history_command(&context, suggestion_id)?
             }
             None => render_suggestions_table(&context, explain)?,
         },
@@ -452,6 +458,68 @@ fn explain_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> a
         preview_suggestion(&conn, suggestion_id).context("failed to preview suggestion impact")?;
 
     for line in render_suggestion_explanation_report(&resolved, &preview) {
+        println!("{line}");
+    }
+
+    Ok(())
+}
+
+fn render_suggestion_history(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let suggestions =
+        list_all_suggestion_records(&conn).context("failed to read suggestion history")?;
+
+    if suggestions.is_empty() {
+        println!("No suggestion history stored.");
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = suggestions
+        .into_iter()
+        .map(|suggestion| {
+            let latest = render_latest_interaction(&suggestion);
+            vec![
+                suggestion.suggestion_id.to_string(),
+                suggestion.status,
+                render_pattern_name(&suggestion.signature),
+                suggestion.shown_count.to_string(),
+                suggestion.accepted_count.to_string(),
+                suggestion.rejected_count.to_string(),
+                suggestion.snoozed_count.to_string(),
+                latest,
+                suggestion.proposal_text,
+            ]
+        })
+        .collect();
+    print_table(
+        &[
+            "id",
+            "status",
+            "pattern",
+            "shown",
+            "accepted",
+            "rejected",
+            "snoozed",
+            "latest",
+            "description",
+        ],
+        &rows,
+    );
+    Ok(())
+}
+
+fn show_suggestion_history_command(
+    context: &RuntimeContext,
+    suggestion_id: i64,
+) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let suggestion = list_all_suggestion_records(&conn)
+        .context("failed to read suggestion history")?
+        .into_iter()
+        .find(|suggestion| suggestion.suggestion_id == suggestion_id)
+        .ok_or_else(|| anyhow::anyhow!("suggestion {suggestion_id} not found"))?;
+
+    for line in render_suggestion_history_report(&suggestion) {
         println!("{line}");
     }
 
@@ -925,6 +993,73 @@ fn render_decision_action(action: SuggestionDecisionAction) -> &'static str {
         SuggestionDecisionAction::Delay => "delayed",
         SuggestionDecisionAction::Suppress => "suppressed",
     }
+}
+
+fn render_latest_interaction(suggestion: &StoredSuggestionRecord) -> String {
+    [
+        ("shown", suggestion.last_shown_ts.as_deref()),
+        ("accepted", suggestion.last_accepted_ts.as_deref()),
+        ("rejected", suggestion.last_rejected_ts.as_deref()),
+        ("snoozed", suggestion.last_snoozed_ts.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| value.map(|timestamp| (label, timestamp)))
+    .max_by(|left, right| left.1.cmp(right.1))
+    .map(|(label, timestamp)| format!("{label} {}", format_timestamp(timestamp)))
+    .unwrap_or_else(|| "-".to_string())
+}
+
+fn render_suggestion_history_report(suggestion: &StoredSuggestionRecord) -> Vec<String> {
+    let mut lines = vec![
+        format!("suggestion: {}", suggestion.suggestion_id),
+        format!("status: {}", suggestion.status),
+        format!("pattern: {}", suggestion.canonical_summary),
+        format!("signature: {}", suggestion.signature),
+        format!("proposal: {}", suggestion.proposal_text),
+        format!(
+            "feedback: shown={}, accepted={}, rejected={}, snoozed={}",
+            suggestion.shown_count,
+            suggestion.accepted_count,
+            suggestion.rejected_count,
+            suggestion.snoozed_count
+        ),
+        format!("latest: {}", render_latest_interaction(suggestion)),
+    ];
+
+    lines.push(format!(
+        "last_shown: {}",
+        suggestion
+            .last_shown_ts
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string())
+    ));
+    lines.push(format!(
+        "last_accepted: {}",
+        suggestion
+            .last_accepted_ts
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string())
+    ));
+    lines.push(format!(
+        "last_rejected: {}",
+        suggestion
+            .last_rejected_ts
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string())
+    ));
+    lines.push(format!(
+        "last_snoozed: {}",
+        suggestion
+            .last_snoozed_ts
+            .as_deref()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string())
+    ));
+
+    lines
 }
 
 fn baseline_fallback_explainability(score: f64) -> SuggestionExplainability {
