@@ -149,6 +149,8 @@ flowctl config show
 flowctl stats
 flowctl patterns
 flowctl sessions
+flowctl watch
+flowctl watch --category events
 flowctl suggestions
 flowctl suggestions --explain
 flowctl suggestions explain <suggestion_id>
