@@ -111,9 +111,7 @@ pub fn download_line_to_raw_event(
     strip_query_strings: bool,
 ) -> Result<RawEvent, BrowserBridgeError> {
     let record: BrowserDownloadRecord = serde_json::from_str(line).map_err(|error| {
-        BrowserBridgeError::InvalidRecord(format!(
-            "invalid browser download record: {error}"
-        ))
+        BrowserBridgeError::InvalidRecord(format!("invalid browser download record: {error}"))
     })?;
 
     record_to_raw_event(&record, strip_query_strings)
@@ -132,7 +130,10 @@ pub fn record_to_raw_event(
 
     let extension = file_extension(record.path.as_deref().unwrap_or(filename));
     let started_at = record.started_at.unwrap_or(record.ts);
-    let duration_ms = record.ts.signed_duration_since(started_at).num_milliseconds();
+    let duration_ms = record
+        .ts
+        .signed_duration_since(started_at)
+        .num_milliseconds();
 
     Ok(RawEvent {
         ts: record.ts,

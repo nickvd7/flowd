@@ -1,0 +1,50 @@
+[
+  {
+    "ts": "2026-03-13T13:00:03Z",
+    "source": "Browser",
+    "payload": {
+      "kind": "download",
+      "filename": "statement-checking-2026-01.pdf",
+      "path": "/demo/Downloads/statement-checking-2026-01.pdf",
+      "extension": "pdf",
+      "browser": "firefox",
+      "source_url": "https://bank.demo.local/files/statement-checking-2026-01.pdf",
+      "page_url": "https://bank.demo.local/statements",
+      "started_at": "2026-03-13T13:00:00+00:00",
+      "duration_ms": 3000
+    }
+  },
+  {
+    "ts": "2026-03-13T13:00:25Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Documents/Finance/Statements/statement-checking-2026-01.pdf",
+      "from_path": "/demo/Downloads/statement-checking-2026-01.pdf"
+    }
+  },
+  {
+    "ts": "2026-03-13T14:00:03Z",
+    "source": "Browser",
+    "payload": {
+      "kind": "download",
+      "filename": "statement-checking-2026-02.pdf",
+      "path": "/demo/Downloads/statement-checking-2026-02.pdf",
+      "extension": "pdf",
+      "browser": "firefox",
+      "source_url": "https://bank.demo.local/files/statement-checking-2026-02.pdf",
+      "page_url": "https://bank.demo.local/statements",
+      "started_at": "2026-03-13T14:00:00+00:00",
+      "duration_ms": 3000
+    }
+  },
+  {
+    "ts": "2026-03-13T14:00:25Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Documents/Finance/Statements/statement-checking-2026-02.pdf",
+      "from_path": "/demo/Downloads/statement-checking-2026-02.pdf"
+    }
+  }
+]
