@@ -3,6 +3,7 @@ mod observation;
 use anyhow::{Context, Result};
 use chrono::Duration;
 use clap::Parser;
+use flow_adapters::browser::{BrowserBridgeError, BrowserDownloadsObserver};
 use flow_adapters::clipboard::{ClipboardObserver, ClipboardReadError, CommandClipboardReader};
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
 use flow_analysis::catch_up_analysis;
@@ -41,6 +42,7 @@ fn run() -> Result<()> {
     let mut observation =
         ObservationPipeline::new(Duration::milliseconds(config.file_event_dedup_window_ms));
     let mut clipboard = build_clipboard_observer(&config);
+    let mut browser_downloads = build_browser_downloads_observer(&config);
 
     for path in &observed_paths {
         watch_path(&mut watcher, path)
@@ -58,6 +60,13 @@ fn run() -> Result<()> {
                 "clipboard observation is enabled but no supported local backend was found"
             ),
         }
+    }
+
+    if config.observe_browser_downloads {
+        println!(
+            "browser download observation enabled at {}",
+            expand_home(&config.browser_downloads_bridge_path).display()
+        );
     }
 
     loop {
@@ -99,6 +108,22 @@ fn run() -> Result<()> {
                 Err(error) => handle_clipboard_error(error),
             }
         }
+
+        if let Some(observer) = browser_downloads.as_mut() {
+            match observer.poll() {
+                Ok(raw_events) => {
+                    for raw_event in raw_events {
+                        observation
+                            .accept_raw_event(&conn, raw_event.clone())
+                            .context("failed during browser download observation")?;
+                        catch_up_analysis(&mut conn, config.session_inactivity_secs)
+                            .context("failed during analysis refresh")?;
+                        println!("{}", serde_json::to_string(&raw_event)?);
+                    }
+                }
+                Err(error) => handle_browser_bridge_error(error),
+            }
+        }
     }
 
     Ok(())
@@ -116,8 +141,23 @@ fn build_clipboard_observer(config: &Config) -> Option<ClipboardObserver<Command
     ))
 }
 
+fn build_browser_downloads_observer(config: &Config) -> Option<BrowserDownloadsObserver> {
+    if !config.observe_browser_downloads {
+        return None;
+    }
+
+    Some(BrowserDownloadsObserver::new(
+        expand_home(&config.browser_downloads_bridge_path),
+        config.strip_browser_query_strings,
+    ))
+}
+
 fn handle_clipboard_error(error: ClipboardReadError) {
     eprintln!("clipboard observation error: {error}");
+}
+
+fn handle_browser_bridge_error(error: BrowserBridgeError) {
+    eprintln!("browser download observation error: {error}");
 }
 
 fn resolve_observed_paths(config: &Config) -> Result<Vec<PathBuf>> {
@@ -150,7 +190,10 @@ fn open_database(config: &Config) -> Result<Connection> {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use flow_adapters::file_watcher::{synthetic_file_event, FileEvent, FileEventKind};
+    use flow_adapters::{
+        browser::synthetic_download_event,
+        file_watcher::{synthetic_file_event, FileEvent, FileEventKind},
+    };
     use flow_core::events::EventSource;
     use observation::RecentFileEventDeduper;
     use tempfile::tempdir;
@@ -254,6 +297,42 @@ mod tests {
 
         assert_eq!(count, 1);
         assert_eq!(raw_event_id, 1);
+    }
+
+    #[test]
+    fn persists_browser_download_raw_events_into_sqlite() {
+        let dir = tempdir().unwrap();
+        let config = Config {
+            database_path: dir.path().join("flowd.db").display().to_string(),
+            ..Config::default()
+        };
+        let conn = open_database(&config).unwrap();
+        let raw_event = synthetic_download_event(
+            Utc.with_ymd_and_hms(2026, 3, 13, 10, 0, 2).unwrap(),
+            "invoice-1001.pdf",
+            Some("/tmp/Downloads/invoice-1001.pdf".to_string()),
+            Some("chrome".to_string()),
+            Some("https://example.test/files/invoice-1001.pdf?token=secret".to_string()),
+            Some("https://example.test/invoices?month=march".to_string()),
+            Some(Utc.with_ymd_and_hms(2026, 3, 13, 10, 0, 0).unwrap()),
+            true,
+        );
+
+        flow_db::repo::insert_raw_event(&conn, &raw_event).unwrap();
+
+        let (source, payload_json): (String, String) = conn
+            .query_row(
+                "SELECT source, payload_json FROM raw_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(source, format!("{:?}", EventSource::Browser));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload_json).unwrap(),
+            raw_event.payload
+        );
     }
 
     #[test]

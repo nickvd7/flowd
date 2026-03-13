@@ -111,6 +111,8 @@ If you want to change observed folders or runtime behavior, create a config file
 database_path = "./flowd.db"
 observed_folders = ["~/Downloads"]
 observe_clipboard = false
+observe_browser_downloads = false
+browser_downloads_bridge_path = "~/.flowd/browser-downloads.ndjson"
 observe_terminal = true
 observe_active_window = false
 redact_clipboard_content = true
@@ -189,6 +191,7 @@ The main pipeline is:
 
 ```text
 filesystem events
+  + browser download bridge events
   -> normalized events
   -> sessions
   -> patterns

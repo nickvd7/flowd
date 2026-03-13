@@ -7,17 +7,7 @@ pub fn normalize(raw: &RawEvent) -> Option<NormalizedEvent> {
         EventSource::FileWatcher => normalize_file_event(raw),
         EventSource::Terminal => normalize_terminal_event(raw),
         EventSource::Clipboard => normalize_clipboard_event(raw),
-        EventSource::Browser => Some(NormalizedEvent {
-            ts: raw.ts,
-            action_type: ActionType::VisitUrl,
-            app: Some("browser".to_string()),
-            target: raw
-                .payload
-                .get("url")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            metadata: raw.payload.clone(),
-        }),
+        EventSource::Browser => normalize_browser_event(raw),
         EventSource::ActiveWindow => Some(NormalizedEvent {
             ts: raw.ts,
             action_type: ActionType::SwitchApp,
@@ -81,6 +71,62 @@ fn normalize_clipboard_event(raw: &RawEvent) -> Option<NormalizedEvent> {
             "file_group": clipboard_group(category),
         }),
     })
+}
+
+fn normalize_browser_event(raw: &RawEvent) -> Option<NormalizedEvent> {
+    match raw.payload.get("kind").and_then(|value| value.as_str())? {
+        "visit" => Some(NormalizedEvent {
+            ts: raw.ts,
+            action_type: ActionType::VisitUrl,
+            app: Some("browser".to_string()),
+            target: raw
+                .payload
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            metadata: raw.payload.clone(),
+        }),
+        "download" => {
+            let filename = raw.payload.get("filename").and_then(|value| value.as_str())?;
+            let path = raw.payload.get("path").and_then(|value| value.as_str());
+            let app = raw
+                .payload
+                .get("browser")
+                .and_then(|value| value.as_str())
+                .unwrap_or("browser")
+                .to_string();
+            let target = path
+                .map(|value| value.to_string())
+                .or_else(|| Some(filename.to_string()));
+            let group_source = path.unwrap_or(filename);
+
+            Some(NormalizedEvent {
+                ts: raw.ts,
+                action_type: ActionType::DownloadFile,
+                app: Some(app),
+                target,
+                metadata: json!({
+                    "kind": "download",
+                    "filename": filename,
+                    "path": raw.payload.get("path").cloned().unwrap_or_default(),
+                    "extension": raw
+                        .payload
+                        .get("extension")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| file_extension(group_source)),
+                    "browser": raw.payload.get("browser").cloned().unwrap_or_default(),
+                    "source_url": raw.payload.get("source_url").cloned().unwrap_or_default(),
+                    "page_url": raw.payload.get("page_url").cloned().unwrap_or_default(),
+                    "started_at": raw.payload.get("started_at").cloned().unwrap_or_default(),
+                    "duration_ms": raw.payload.get("duration_ms").cloned().unwrap_or_default(),
+                    "source": "browser_downloads",
+                    "file_group": file_group(group_source),
+                }),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn normalize_file_event(raw: &RawEvent) -> Option<NormalizedEvent> {
@@ -238,6 +284,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use flow_adapters::terminal::synthetic_terminal_history_event;
     use flow_adapters::{
+        browser::synthetic_download_event,
         clipboard::synthetic_clipboard_event,
         file_watcher::{synthetic_file_event, FileEventKind},
     };
@@ -338,5 +385,36 @@ mod tests {
 
         assert_eq!(event.target.as_deref(), Some("Xxxxxxx-0000.xxx"));
         assert_eq!(event.metadata["captured"], true);
+    }
+
+    #[test]
+    fn normalizes_browser_download_events_with_file_metadata() {
+        let raw = synthetic_download_event(
+            Utc.with_ymd_and_hms(2026, 3, 13, 10, 0, 2).unwrap(),
+            "invoice-1001.pdf",
+            Some("/tmp/Downloads/invoice-1001.pdf".to_string()),
+            Some("firefox".to_string()),
+            Some("https://example.test/files/invoice-1001.pdf?token=secret".to_string()),
+            Some("https://example.test/invoices?month=march".to_string()),
+            Some(Utc.with_ymd_and_hms(2026, 3, 13, 10, 0, 0).unwrap()),
+            true,
+        );
+
+        let event = normalize(&raw).unwrap();
+
+        assert_eq!(event.action_type, ActionType::DownloadFile);
+        assert_eq!(event.app.as_deref(), Some("firefox"));
+        assert_eq!(
+            event.target.as_deref(),
+            Some("/tmp/Downloads/invoice-1001.pdf")
+        );
+        assert_eq!(event.metadata["source"], "browser_downloads");
+        assert_eq!(event.metadata["extension"], "pdf");
+        assert_eq!(event.metadata["file_group"], "invoice");
+        assert_eq!(
+            event.metadata["source_url"],
+            "https://example.test/files/invoice-1001.pdf"
+        );
+        assert_eq!(event.metadata["duration_ms"], 2000);
     }
 }
