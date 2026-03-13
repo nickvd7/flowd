@@ -42,6 +42,8 @@ Approved suggestion 3 as automation 1
 
 After approval, future matching files can be handled by the generated automation instead of repeating the same manual steps.
 
+For more realistic cases, see [docs/example-workflows.md](/Users/nickvandort/Documents/Coding/flowd/docs/example-workflows.md).
+
 ## Installation
 
 ### Install with cargo
