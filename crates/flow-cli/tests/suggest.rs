@@ -28,7 +28,7 @@ fn suggest_renders_detected_file_workflow() {
     assert_eq!(suggestion.shown_count, 1);
     assert!(suggestion.last_shown_ts.is_some());
     let expected = format!(
-        "[{}] {}\n  pattern: {} | runs: {} | avg: {} | score: {:.3} | freshness: {} | last seen: {}\n",
+        "[{}] {}\n  pattern: {} | runs: {} | avg: {} | score: {:.3} | freshness: {} | last seen: {}\n\nNext steps:\n1. Inspect one suggestion: flowctl suggestions explain {}\n2. Review suggestion history: flowctl suggestions history\n3. Approve a suggestion: flowctl approve {}\n",
         suggestion.suggestion_id,
         suggestion.proposal_text,
         suggestion.canonical_summary,
@@ -37,6 +37,8 @@ fn suggest_renders_detected_file_workflow() {
         suggestion.usefulness_score,
         suggestion.freshness,
         format_timestamp(&suggestion.last_seen_at),
+        suggestion.suggestion_id,
+        suggestion.suggestion_id,
     );
     assert_eq!(stdout, expected);
 }
@@ -58,6 +60,9 @@ fn suggest_explain_renders_baseline_fallback_details() {
     assert!(stdout.contains("explain: baseline fallback"));
     assert!(stdout.contains("score: baseline_score="));
     assert!(stdout.contains("factors: fallback=No intelligence decision was applied."));
+    assert!(stdout.contains("Next steps:"));
+    assert!(stdout.contains("flowctl suggestions history"));
+    assert!(stdout.contains("flowctl approve 1"));
 }
 
 #[test]

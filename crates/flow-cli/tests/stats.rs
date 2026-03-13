@@ -33,6 +33,11 @@ fn stats_renders_zero_counts_for_empty_database() {
             "automation_runs: 0\n",
             "undo_runs: 0\n",
             "estimated_time_saved: 0s\n",
+            "\n",
+            "Next steps:\n",
+            "1. Inspect pending suggestions: flowctl suggestions\n",
+            "2. Inspect approved automations: flowctl automations\n",
+            "3. Inspect config values: flowctl config show\n",
         )
     );
 }
@@ -61,6 +66,11 @@ fn stats_renders_local_usage_summary() {
             "automation_runs: 2\n",
             "undo_runs: 1\n",
             "estimated_time_saved: 1m\n",
+            "\n",
+            "Next steps:\n",
+            "1. Inspect pending suggestions: flowctl suggestions\n",
+            "2. Inspect approved automations: flowctl automations\n",
+            "3. Inspect config values: flowctl config show\n",
         )
     );
 }

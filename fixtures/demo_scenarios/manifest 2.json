@@ -1,0 +1,40 @@
+{
+  "scenarios": [
+    {
+      "id": "invoice_organization",
+      "title": "invoice organization",
+      "file": "invoice_organization.raw_events.json",
+      "expected_sources": ["Browser", "FileWatcher"],
+      "expected_normalized_events": 6,
+      "expected_pattern_signature": "DownloadFile:invoice->RenameFile:invoice_reviewed->MoveFile:invoice_reviewed",
+      "expected_proposal_contains": "Repeated invoice file workflow detected"
+    },
+    {
+      "id": "screenshot_cleanup",
+      "title": "screenshot cleanup",
+      "file": "screenshot_cleanup.raw_events.json",
+      "expected_sources": ["FileWatcher"],
+      "expected_normalized_events": 4,
+      "expected_pattern_signature": "CreateFile:screenshot->MoveFile:screenshot",
+      "expected_proposal_contains": "Repeated screenshot file workflow detected"
+    },
+    {
+      "id": "downloads_sorting",
+      "title": "downloads sorting",
+      "file": "downloads_sorting.raw_events.json",
+      "expected_sources": ["Browser", "FileWatcher"],
+      "expected_normalized_events": 4,
+      "expected_pattern_signature": "DownloadFile:statement_checking->MoveFile:statement_checking",
+      "expected_proposal_contains": "Repeated statement_checking file workflow detected"
+    },
+    {
+      "id": "terminal_file_organization",
+      "title": "terminal-driven file organization",
+      "file": "terminal_file_organization.raw_events.json",
+      "expected_sources": ["Terminal"],
+      "expected_normalized_events": 4,
+      "expected_pattern_signature": "RenameFile:project_brief_reviewed->MoveFile:project_brief_reviewed",
+      "expected_proposal_contains": "Repeated project_brief_reviewed file workflow detected"
+    }
+  ]
+}

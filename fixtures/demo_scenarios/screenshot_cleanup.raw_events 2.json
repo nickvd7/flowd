@@ -1,0 +1,38 @@
+[
+  {
+    "ts": "2026-03-13T11:00:00Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "create",
+      "path": "/demo/Desktop/screenshot-2026-03-13-110000.png",
+      "from_path": null
+    }
+  },
+  {
+    "ts": "2026-03-13T11:00:18Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Pictures/Screenshots/screenshot-2026-03-13-110000.png",
+      "from_path": "/demo/Desktop/screenshot-2026-03-13-110000.png"
+    }
+  },
+  {
+    "ts": "2026-03-13T12:00:00Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "create",
+      "path": "/demo/Desktop/screenshot-2026-03-13-120000.png",
+      "from_path": null
+    }
+  },
+  {
+    "ts": "2026-03-13T12:00:18Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Pictures/Screenshots/screenshot-2026-03-13-120000.png",
+      "from_path": "/demo/Desktop/screenshot-2026-03-13-120000.png"
+    }
+  }
+]

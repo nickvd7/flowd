@@ -92,7 +92,7 @@ fn setup_creates_config_and_prints_next_steps() {
     assert_eq!(
         stdout,
         format!(
-            "Created config: {}\nObserved folders: ~/Inbox\n\nNext steps:\n1. Start the daemon: flow-daemon --config {}\n2. Inspect suggestions: flowctl --config {} suggestions\n3. Approve an automation: flowctl --config {} approve <suggestion_id>\n4. Inspect generated config: flowctl --config {} config show\n",
+            "Created config: {}\nObserved folders: ~/Inbox\n\nNext steps:\n1. Start the daemon: flow-daemon --config {}\n2. Inspect generated config: flowctl --config {} config show\n3. Inspect suggestions: flowctl --config {} suggestions\n4. Review local stats: flowctl --config {} stats\n",
             config_path.display(),
             config_path.display(),
             config_path.display(),
@@ -144,7 +144,7 @@ observed_folders = ["~/Downloads"]
     assert_eq!(
         stdout,
         format!(
-            "Config already exists: {}\nObserved folders: ~/Downloads\nNo changes were made.\nRequested watched paths were not applied. Re-run with --force to rewrite the config.\n\nNext steps:\n1. Start the daemon: flow-daemon --config {}\n2. Inspect suggestions: flowctl --config {} suggestions\n3. Approve an automation: flowctl --config {} approve <suggestion_id>\n4. Inspect generated config: flowctl --config {} config show\n",
+            "Config already exists: {}\nObserved folders: ~/Downloads\nNo changes were made.\nRequested watched paths were not applied. Re-run with --force to rewrite the config.\n\nNext steps:\n1. Start the daemon: flow-daemon --config {}\n2. Inspect generated config: flowctl --config {} config show\n3. Inspect suggestions: flowctl --config {} suggestions\n4. Review local stats: flowctl --config {} stats\n",
             config_path.display(),
             config_path.display(),
             config_path.display(),
@@ -187,6 +187,39 @@ observed_folders = ["~/Downloads"]
     let rendered_config = std::fs::read_to_string(&config_path).unwrap();
     assert!(rendered_config.contains("database_path = \"./custom.db\""));
     assert!(rendered_config.contains("observed_folders = [\"~/Inbox\"]"));
+}
+
+#[test]
+fn root_help_lists_discoverable_commands_and_examples() {
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Inspect local workflow suggestions, automations, and config for flowd"));
+    assert!(stdout.contains("suggestions"));
+    assert!(stdout.contains("stats"));
+    assert!(stdout.contains("config"));
+    assert!(stdout.contains("flowctl suggestions explain 1"));
+    assert!(stdout.contains("flowctl automations show 1"));
+}
+
+#[test]
+fn suggestions_help_mentions_explain_show_and_history() {
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["suggestions", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("List suggestions and inspect explainability or feedback history"));
+    assert!(stdout.contains("explain"));
+    assert!(stdout.contains("history"));
+    assert!(stdout.contains("show"));
+    assert!(stdout.contains("flowctl suggestions explain 1"));
 }
 
 fn write_config(path: &Path, contents: &str) {
