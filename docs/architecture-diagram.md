@@ -94,7 +94,7 @@ EXECUTION LAYER
 │ - status            │
 │ - patterns          │
 │ - suggest           │
-│ - tail              │
+│ - watch             │
 └─────────┬───────────┘
           │
           ▼

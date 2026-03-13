@@ -356,6 +356,70 @@ pub fn list_normalized_events(conn: &Connection) -> rusqlite::Result<Vec<StoredN
     rows.collect()
 }
 
+pub fn list_raw_events_after(
+    conn: &Connection,
+    after_id: i64,
+) -> rusqlite::Result<Vec<StoredRawEvent>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, ts, source, payload_json
+        FROM raw_events
+        WHERE id > ?1
+        ORDER BY id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([after_id], |row| {
+        let ts: String = row.get(1)?;
+        let source: String = row.get(2)?;
+        let payload_json: String = row.get(3)?;
+
+        Ok(StoredRawEvent {
+            id: row.get(0)?,
+            event: RawEvent {
+                ts: parse_timestamp(&ts)?,
+                source: parse_event_source(&source)?,
+                payload: parse_json_value(&payload_json)?,
+            },
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn list_normalized_events_after(
+    conn: &Connection,
+    after_id: i64,
+) -> rusqlite::Result<Vec<StoredNormalizedEvent>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT id, ts, action_type, app, target, metadata_json
+        FROM normalized_events
+        WHERE id > ?1
+        ORDER BY id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([after_id], |row| {
+        let ts: String = row.get(1)?;
+        let action_type: String = row.get(2)?;
+        let metadata_json: String = row.get(5)?;
+
+        Ok(StoredNormalizedEvent {
+            id: row.get(0)?,
+            event: NormalizedEvent {
+                ts: parse_timestamp(&ts)?,
+                action_type: parse_action_type(&action_type)?,
+                app: row.get(3)?,
+                target: row.get(4)?,
+                metadata: parse_json_value(&metadata_json)?,
+            },
+        })
+    })?;
+
+    rows.collect()
+}
+
 pub fn insert_session(
     conn: &Connection,
     start_ts: &str,
@@ -1187,6 +1251,35 @@ pub fn list_recent_sessions(
     )?;
 
     let rows = statement.query_map([limit], |row| {
+        Ok(StoredSession {
+            session_id: row.get(0)?,
+            start_ts: row.get(1)?,
+            end_ts: row.get(2)?,
+            event_count: row.get::<_, i64>(3)? as usize,
+            duration_ms: row.get(4)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+pub fn list_sessions(conn: &Connection) -> rusqlite::Result<Vec<StoredSession>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            sessions.id,
+            sessions.start_ts,
+            sessions.end_ts,
+            COUNT(session_events.event_id) AS event_count,
+            ((strftime('%s', sessions.end_ts) - strftime('%s', sessions.start_ts)) * 1000) AS duration_ms
+        FROM sessions
+        LEFT JOIN session_events ON session_events.session_id = sessions.id
+        GROUP BY sessions.id, sessions.start_ts, sessions.end_ts
+        ORDER BY sessions.start_ts ASC, sessions.id ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
         Ok(StoredSession {
             session_id: row.get(0)?,
             start_ts: row.get(1)?,

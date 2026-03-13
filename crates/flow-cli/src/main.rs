@@ -1,6 +1,6 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use flow_analysis::intelligence_boundary::{
     ExplainabilitySource, IntelligenceBoundary, IntelligenceClient, NoopIntelligenceClient,
     SuggestionDecisionAction, SuggestionDisplayResult, SuggestionExplainability,
@@ -12,9 +12,10 @@ use flow_db::{
     open_database,
     repo::{
         get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
-        list_all_suggestion_records, list_automations, list_patterns, list_recent_sessions,
-        list_suggestions, load_local_usage_stats, set_suggestion_status, LocalUsageStats,
-        StoredSuggestion, StoredSuggestionRecord,
+        list_all_suggestion_records, list_automations, list_normalized_events_after, list_patterns,
+        list_raw_events_after, list_recent_sessions, list_sessions, list_suggestions,
+        load_local_usage_stats, set_suggestion_status, LocalUsageStats, StoredPattern,
+        StoredRawEvent, StoredSession, StoredSuggestion, StoredSuggestionRecord,
     },
 };
 use flow_dsl::{Action, AutomationSpec};
@@ -25,9 +26,12 @@ use flow_exec::{
 };
 use serde_json::Value;
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt::Display,
     fs,
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
 
 const ROOT_AFTER_HELP: &str = "\
@@ -39,7 +43,7 @@ Examples:
   flowctl suggestions history
   flowctl approve 1
   flowctl automations show 1
-  flowctl stats";
+  flowctl watch";
 
 const CONFIG_AFTER_HELP: &str = "\
 Examples:
@@ -120,8 +124,21 @@ enum Commands {
     },
     #[command(about = "List recent workflow sessions")]
     Sessions,
-    #[command(about = "Tail flowd activity output")]
-    Tail,
+    #[command(about = "Watch flowd activity as it is observed and inferred", visible_alias = "tail")]
+    Watch {
+        #[arg(
+            long = "category",
+            value_name = "NAME",
+            value_enum,
+            num_args = 1..,
+            value_delimiter = ','
+        )]
+        categories: Vec<WatchCategory>,
+        #[arg(long, default_value_t = 1000, value_name = "MS")]
+        poll_interval_ms: u64,
+        #[arg(long)]
+        once: bool,
+    },
     #[command(about = "Approve a suggestion into a deterministic automation")]
     Approve {
         suggestion_id: i64,
@@ -192,6 +209,14 @@ enum ConfigCommand {
     Path,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum WatchCategory {
+    Events,
+    Sessions,
+    Patterns,
+    Suggestions,
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeContext {
     loaded_config: LoadedConfig,
@@ -233,7 +258,11 @@ fn run() -> anyhow::Result<()> {
             None => render_suggestions_table(&context, explain)?,
         },
         Some(Commands::Sessions) => render_sessions(&context)?,
-        Some(Commands::Tail) => println!("tail: not implemented"),
+        Some(Commands::Watch {
+            categories,
+            poll_interval_ms,
+            once,
+        }) => render_watch(&context, &categories, poll_interval_ms, once)?,
         Some(Commands::Approve { suggestion_id }) => {
             approve_automation_command(&context, suggestion_id)?
         }
@@ -667,6 +696,304 @@ fn render_sessions(context: &RuntimeContext) -> anyhow::Result<()> {
         .collect();
     print_table(&["id", "events", "duration", "start", "end"], &rows);
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WatchSessionFingerprint {
+    start_ts: String,
+    end_ts: String,
+    event_count: usize,
+    duration_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WatchPatternSnapshot {
+    pattern_id: i64,
+    signature: String,
+    count: usize,
+    avg_duration_ms: i64,
+    canonical_summary: String,
+    usefulness_score: f64,
+    last_seen_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchSuggestionSnapshot {
+    suggestion_id: i64,
+    pattern_id: i64,
+    status: String,
+    signature: String,
+    canonical_summary: String,
+    proposal_text: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WatchState {
+    last_raw_event_id: i64,
+    last_normalized_event_id: i64,
+    seen_sessions: BTreeSet<WatchSessionFingerprint>,
+    patterns: BTreeMap<i64, WatchPatternSnapshot>,
+    suggestions: BTreeMap<i64, WatchSuggestionSnapshot>,
+}
+
+fn render_watch(
+    context: &RuntimeContext,
+    categories: &[WatchCategory],
+    poll_interval_ms: u64,
+    once: bool,
+) -> anyhow::Result<()> {
+    let categories = selected_watch_categories(categories);
+    let poll_interval = Duration::from_millis(poll_interval_ms.max(100));
+    let mut state = if once {
+        WatchState::default()
+    } else {
+        bootstrap_watch_state(context)?
+    };
+
+    if !once {
+        println!(
+            "Watching categories: {} (poll: {}ms)",
+            render_watch_category_list(&categories),
+            poll_interval.as_millis()
+        );
+    }
+
+    loop {
+        let conn = open_cli_database(context)?;
+        let lines = collect_watch_lines(&conn, &categories, &mut state)?;
+        for line in lines {
+            println!("{line}");
+        }
+
+        if once {
+            break;
+        }
+
+        thread::sleep(poll_interval);
+    }
+
+    Ok(())
+}
+
+fn bootstrap_watch_state(context: &RuntimeContext) -> anyhow::Result<WatchState> {
+    let conn = open_cli_database(context)?;
+    let raw_events = list_raw_events_after(&conn, 0).context("failed to read raw events")?;
+    let normalized_events =
+        list_normalized_events_after(&conn, 0).context("failed to read normalized events")?;
+    let sessions = list_sessions(&conn).context("failed to read sessions")?;
+    let patterns = list_patterns(&conn).context("failed to read patterns")?;
+    let suggestions =
+        list_all_suggestion_records(&conn).context("failed to read suggestion history")?;
+
+    Ok(WatchState {
+        last_raw_event_id: raw_events.last().map(|event| event.id).unwrap_or(0),
+        last_normalized_event_id: normalized_events.last().map(|event| event.id).unwrap_or(0),
+        seen_sessions: sessions
+            .into_iter()
+            .map(|session| watch_session_fingerprint(&session))
+            .collect(),
+        patterns: patterns
+            .into_iter()
+            .map(|pattern| (pattern.pattern_id, watch_pattern_snapshot(&pattern)))
+            .collect(),
+        suggestions: suggestions
+            .into_iter()
+            .map(|suggestion| {
+                (
+                    suggestion.suggestion_id,
+                    watch_suggestion_snapshot(&suggestion),
+                )
+            })
+            .collect(),
+    })
+}
+
+fn collect_watch_lines(
+    conn: &rusqlite::Connection,
+    categories: &BTreeSet<WatchCategory>,
+    state: &mut WatchState,
+) -> anyhow::Result<Vec<String>> {
+    let mut lines = Vec::new();
+
+    if categories.contains(&WatchCategory::Events) {
+        let raw_events =
+            list_raw_events_after(conn, state.last_raw_event_id).context("failed to read raw events")?;
+        if let Some(last) = raw_events.last() {
+            state.last_raw_event_id = last.id;
+        }
+        lines.extend(raw_events.iter().map(render_watch_raw_event));
+
+        let normalized_events = list_normalized_events_after(conn, state.last_normalized_event_id)
+            .context("failed to read normalized events")?;
+        if let Some(last) = normalized_events.last() {
+            state.last_normalized_event_id = last.id;
+        }
+        lines.extend(
+            normalized_events
+                .iter()
+                .map(|event| render_watch_normalized_event(&event.event)),
+        );
+    }
+
+    if categories.contains(&WatchCategory::Sessions) {
+        let sessions = list_sessions(conn).context("failed to read sessions")?;
+        for session in sessions {
+            let fingerprint = watch_session_fingerprint(&session);
+            if state.seen_sessions.insert(fingerprint) {
+                lines.push(render_watch_session(&session));
+            }
+        }
+    }
+
+    if categories.contains(&WatchCategory::Patterns) {
+        let patterns = list_patterns(conn).context("failed to read patterns")?;
+        for pattern in patterns {
+            let snapshot = watch_pattern_snapshot(&pattern);
+            match state.patterns.get(&pattern.pattern_id) {
+                None => {
+                    lines.push(render_watch_pattern_detected(&pattern));
+                }
+                Some(previous) if previous != &snapshot => {
+                    lines.push(render_watch_pattern_updated(previous, &pattern));
+                }
+                Some(_) => {}
+            }
+            state.patterns.insert(pattern.pattern_id, snapshot);
+        }
+    }
+
+    if categories.contains(&WatchCategory::Suggestions) {
+        let suggestions =
+            list_all_suggestion_records(conn).context("failed to read suggestion history")?;
+        for suggestion in suggestions {
+            let snapshot = watch_suggestion_snapshot(&suggestion);
+            match state.suggestions.get(&suggestion.suggestion_id) {
+                None => lines.push(render_watch_suggestion_created(&suggestion)),
+                Some(previous) if previous != &snapshot => {
+                    lines.push(render_watch_suggestion_updated(previous, &suggestion));
+                }
+                Some(_) => {}
+            }
+            state.suggestions.insert(suggestion.suggestion_id, snapshot);
+        }
+    }
+
+    Ok(lines)
+}
+
+fn selected_watch_categories(categories: &[WatchCategory]) -> BTreeSet<WatchCategory> {
+    if categories.is_empty() {
+        return [
+            WatchCategory::Events,
+            WatchCategory::Sessions,
+            WatchCategory::Patterns,
+            WatchCategory::Suggestions,
+        ]
+        .into_iter()
+        .collect();
+    }
+
+    categories.iter().copied().collect()
+}
+
+fn render_watch_category_list(categories: &BTreeSet<WatchCategory>) -> String {
+    categories
+        .iter()
+        .map(|category| match category {
+            WatchCategory::Events => "events",
+            WatchCategory::Sessions => "sessions",
+            WatchCategory::Patterns => "patterns",
+            WatchCategory::Suggestions => "suggestions",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn watch_session_fingerprint(session: &StoredSession) -> WatchSessionFingerprint {
+    WatchSessionFingerprint {
+        start_ts: session.start_ts.clone(),
+        end_ts: session.end_ts.clone(),
+        event_count: session.event_count,
+        duration_ms: session.duration_ms,
+    }
+}
+
+fn watch_pattern_snapshot(pattern: &StoredPattern) -> WatchPatternSnapshot {
+    WatchPatternSnapshot {
+        pattern_id: pattern.pattern_id,
+        signature: pattern.signature.clone(),
+        count: pattern.count,
+        avg_duration_ms: pattern.avg_duration_ms,
+        canonical_summary: pattern.canonical_summary.clone(),
+        usefulness_score: pattern.usefulness_score,
+        last_seen_at: pattern.last_seen_at.clone(),
+    }
+}
+
+fn watch_suggestion_snapshot(suggestion: &StoredSuggestionRecord) -> WatchSuggestionSnapshot {
+    WatchSuggestionSnapshot {
+        suggestion_id: suggestion.suggestion_id,
+        pattern_id: suggestion.pattern_id,
+        status: suggestion.status.clone(),
+        signature: suggestion.signature.clone(),
+        canonical_summary: suggestion.canonical_summary.clone(),
+        proposal_text: suggestion.proposal_text.clone(),
+    }
+}
+
+fn render_watch_session(session: &StoredSession) -> String {
+    format!(
+        "[session] updated: {} events over {} ({} -> {})",
+        session.event_count,
+        format_duration(session.duration_ms),
+        format_timestamp(&session.start_ts),
+        format_timestamp(&session.end_ts),
+    )
+}
+
+fn render_watch_pattern_detected(pattern: &StoredPattern) -> String {
+    format!(
+        "[pattern] candidate detected: {} (repetitions: {})",
+        render_pattern_name(&pattern.signature),
+        pattern.count,
+    )
+}
+
+fn render_watch_pattern_updated(
+    previous: &WatchPatternSnapshot,
+    pattern: &StoredPattern,
+) -> String {
+    let action = if pattern.count > previous.count {
+        "candidate strengthened"
+    } else {
+        "candidate updated"
+    };
+    format!(
+        "[pattern] {action}: {} (repetitions: {})",
+        render_pattern_name(&pattern.signature),
+        pattern.count,
+    )
+}
+
+fn render_watch_suggestion_created(suggestion: &StoredSuggestionRecord) -> String {
+    format!("[suggestion] created: {}", suggestion.proposal_text)
+}
+
+fn render_watch_suggestion_updated(
+    previous: &WatchSuggestionSnapshot,
+    suggestion: &StoredSuggestionRecord,
+) -> String {
+    if previous.status != suggestion.status {
+        return format!(
+            "[suggestion] status changed: #{} {} -> {}",
+            suggestion.suggestion_id, previous.status, suggestion.status
+        );
+    }
+
+    format!(
+        "[suggestion] updated: #{} {}",
+        suggestion.suggestion_id, suggestion.proposal_text
+    )
 }
 
 fn approve_automation_command(context: &RuntimeContext, suggestion_id: i64) -> anyhow::Result<()> {
@@ -1812,6 +2139,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn watch_category_selection_defaults_to_all_categories_in_stable_order() {
+        let categories = selected_watch_categories(&[]);
+
+        assert_eq!(
+            categories.into_iter().collect::<Vec<_>>(),
+            vec![
+                WatchCategory::Events,
+                WatchCategory::Sessions,
+                WatchCategory::Patterns,
+                WatchCategory::Suggestions,
+            ]
+        );
+    }
+
+    #[test]
+    fn watch_raw_event_rendering_is_compact_and_readable() {
+        let record = StoredRawEvent {
+            id: 1,
+            event: flow_core::events::RawEvent {
+                ts: Utc::now(),
+                source: flow_core::events::EventSource::FileWatcher,
+                payload: serde_json::json!({
+                    "kind": "rename",
+                    "path": "/tmp/archive/invoice-1001.pdf",
+                    "from_path": "/tmp/downloads/invoice-1001.pdf",
+                }),
+            },
+        };
+
+        assert_eq!(
+            render_watch_raw_event(&record),
+            "[event] file rename: /tmp/downloads/invoice-1001.pdf -> /tmp/archive/invoice-1001.pdf"
+        );
+    }
+
+    #[test]
+    fn watch_suggestion_update_prefers_status_changes_over_generic_updates() {
+        let previous = WatchSuggestionSnapshot {
+            suggestion_id: 7,
+            pattern_id: 3,
+            status: "pending".to_string(),
+            signature: "CreateFile:invoice".to_string(),
+            canonical_summary: "CreateFile -> RenameFile".to_string(),
+            proposal_text: "Rename invoices".to_string(),
+        };
+        let suggestion = StoredSuggestionRecord {
+            suggestion_id: 7,
+            pattern_id: 3,
+            status: "approved".to_string(),
+            signature: "CreateFile:invoice".to_string(),
+            canonical_summary: "CreateFile -> RenameFile".to_string(),
+            proposal_text: "Rename invoices".to_string(),
+            shown_count: 0,
+            accepted_count: 1,
+            rejected_count: 0,
+            snoozed_count: 0,
+            last_shown_ts: None,
+            last_accepted_ts: None,
+            last_rejected_ts: None,
+            last_snoozed_ts: None,
+        };
+
+        assert_eq!(
+            render_watch_suggestion_updated(&previous, &suggestion),
+            "[suggestion] status changed: #7 pending -> approved"
+        );
+    }
+
+    #[test]
+    fn watch_pattern_update_labels_strengthened_when_repetition_count_grows() {
+        let previous = WatchPatternSnapshot {
+            pattern_id: 1,
+            signature: "CreateFile:invoice->MoveFile:invoice".to_string(),
+            count: 3,
+            avg_duration_ms: 12_000,
+            canonical_summary: "CreateFile -> MoveFile".to_string(),
+            usefulness_score: 0.8,
+            last_seen_at: "2026-03-13T10:00:00Z".to_string(),
+        };
+        let pattern = StoredPattern {
+            pattern_id: 1,
+            signature: "CreateFile:invoice->MoveFile:invoice".to_string(),
+            count: 4,
+            avg_duration_ms: 12_000,
+            canonical_summary: "CreateFile -> MoveFile".to_string(),
+            usefulness_score: 0.85,
+            last_seen_at: "2026-03-13T10:05:00Z".to_string(),
+        };
+
+        assert_eq!(
+            render_watch_pattern_updated(&previous, &pattern),
+            "[pattern] candidate strengthened: invoice_workflow (repetitions: 4)"
+        );
+    }
+
     fn sample_preview() -> AutomationPreview {
         AutomationPreview {
             estimated_affected_files: Some(2),
@@ -2039,6 +2462,119 @@ where
         .join(" | ")
 }
 
+fn render_watch_raw_event(record: &StoredRawEvent) -> String {
+    let event = &record.event;
+    match event.source {
+        flow_core::events::EventSource::FileWatcher => {
+            let kind = event
+                .payload
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("event");
+            let path = event
+                .payload
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-");
+            let from_path = event
+                .payload
+                .get("from_path")
+                .and_then(|value| value.as_str());
+
+            match (kind, from_path) {
+                ("rename", Some(from_path)) | ("move", Some(from_path)) => format!(
+                    "[event] file {kind}: {} -> {}",
+                    abbreviate_home(from_path),
+                    abbreviate_home(path)
+                ),
+                ("create", _) => format!("[event] file created: {}", abbreviate_home(path)),
+                _ => format!("[event] file {kind}: {}", abbreviate_home(path)),
+            }
+        }
+        flow_core::events::EventSource::Terminal => {
+            let command = event
+                .payload
+                .get("redacted_command")
+                .and_then(|value| value.as_str())
+                .unwrap_or("command");
+            let kind = event
+                .payload
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .unwrap_or("command");
+            format!("[event] terminal {kind}: {command}")
+        }
+        flow_core::events::EventSource::Clipboard => {
+            let category = event
+                .payload
+                .get("category")
+                .and_then(|value| value.as_str())
+                .unwrap_or("text");
+            let length = event
+                .payload
+                .get("content_length")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            format!("[event] clipboard changed: {category} ({length} bytes)")
+        }
+        flow_core::events::EventSource::Browser => match event
+            .payload
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("browser")
+        {
+            "download" => {
+                let path = event
+                    .payload
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| {
+                        event
+                            .payload
+                            .get("filename")
+                            .and_then(|value| value.as_str())
+                    })
+                    .unwrap_or("-");
+                format!("[event] browser download: {}", abbreviate_home(path))
+            }
+            "visit" => {
+                let url = event
+                    .payload
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-");
+                format!("[event] browser visit: {url}")
+            }
+            kind => format!("[event] browser {kind}"),
+        },
+        flow_core::events::EventSource::ActiveWindow => {
+            let app = event
+                .payload
+                .get("app")
+                .and_then(|value| value.as_str())
+                .unwrap_or("window");
+            let title = event
+                .payload
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("-");
+            format!("[event] active window: {app} | {title}")
+        }
+    }
+}
+
+fn render_watch_normalized_event(event: &flow_core::events::NormalizedEvent) -> String {
+    let label = render_action_label(&format!("{:?}", event.action_type));
+    let target = event
+        .target
+        .as_deref()
+        .map(abbreviate_home)
+        .unwrap_or_else(|| "-".to_string());
+    let app = event.app.as_deref().unwrap_or("system");
+
+    format!("[normalized] {label}: {target} ({app})")
+}
+
 fn render_action_label(action: &str) -> String {
     let normalized = action.strip_suffix("File").unwrap_or(action);
     let mut label = String::new();
@@ -2051,4 +2587,23 @@ fn render_action_label(action: &str) -> String {
     }
 
     label
+}
+
+fn abbreviate_home(value: &str) -> String {
+    let Some(home) = std::env::var_os("HOME") else {
+        return value.to_string();
+    };
+    let home = home.to_string_lossy();
+
+    if let Some(remainder) = value.strip_prefix(home.as_ref()) {
+        if remainder.is_empty() {
+            "~".to_string()
+        } else if remainder.starts_with(std::path::MAIN_SEPARATOR) {
+            format!("~{remainder}")
+        } else {
+            value.to_string()
+        }
+    } else {
+        value.to_string()
+    }
 }
