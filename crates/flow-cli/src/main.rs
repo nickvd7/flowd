@@ -13,7 +13,8 @@ use flow_db::{
     repo::{
         get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
         list_all_suggestion_records, list_automations, list_patterns, list_recent_sessions,
-        list_suggestions, set_suggestion_status, StoredSuggestion, StoredSuggestionRecord,
+        list_suggestions, load_local_usage_stats, set_suggestion_status, LocalUsageStats,
+        StoredSuggestion, StoredSuggestionRecord,
     },
 };
 use flow_dsl::{Action, AutomationSpec};
@@ -51,6 +52,7 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    Stats,
     Patterns,
     Suggest {
         #[arg(long)]
@@ -141,6 +143,7 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Status) => println!("flowd status: template skeleton"),
         Some(Commands::Setup { .. }) => unreachable!("setup is handled before runtime config"),
         Some(Commands::Config { command }) => render_config_command(&context, command)?,
+        Some(Commands::Stats) => render_stats(&context)?,
         Some(Commands::Patterns) => render_patterns(&context)?,
         Some(Commands::Suggest { explain }) => render_suggestions(&context, explain)?,
         Some(Commands::Suggestions { command, explain }) => match command {
@@ -430,6 +433,17 @@ fn render_patterns(context: &RuntimeContext) -> anyhow::Result<()> {
         ],
         &rows,
     );
+    Ok(())
+}
+
+fn render_stats(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let stats = load_local_usage_stats(&conn).context("failed to read local usage stats")?;
+
+    for line in render_stats_report(&stats) {
+        println!("{line}");
+    }
+
     Ok(())
 }
 
@@ -1265,6 +1279,21 @@ fn format_timestamp(value: &str) -> String {
         .unwrap_or_else(|_| value.to_string())
 }
 
+fn render_stats_report(stats: &LocalUsageStats) -> Vec<String> {
+    vec![
+        "Local usage stats".to_string(),
+        format!("patterns_detected: {}", stats.pattern_count),
+        format!("suggestions_created: {}", stats.suggestion_count),
+        format!("automations_approved: {}", stats.approved_automation_count),
+        format!("automation_runs: {}", stats.automation_run_count),
+        format!("undo_runs: {}", stats.undo_run_count),
+        format!(
+            "estimated_time_saved: {}",
+            format_duration(stats.estimated_time_saved_ms)
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1351,6 +1380,31 @@ mod tests {
         let ranked = rank_stored_suggestions(&suggestions, &NoopIntelligenceClient).unwrap();
 
         assert_eq!(ranked, suggestions);
+    }
+
+    #[test]
+    fn stats_report_format_is_deterministic() {
+        let stats = LocalUsageStats {
+            pattern_count: 3,
+            suggestion_count: 4,
+            approved_automation_count: 2,
+            automation_run_count: 5,
+            undo_run_count: 1,
+            estimated_time_saved_ms: 90_000,
+        };
+
+        assert_eq!(
+            render_stats_report(&stats),
+            vec![
+                "Local usage stats".to_string(),
+                "patterns_detected: 3".to_string(),
+                "suggestions_created: 4".to_string(),
+                "automations_approved: 2".to_string(),
+                "automation_runs: 5".to_string(),
+                "undo_runs: 1".to_string(),
+                "estimated_time_saved: 1m 30s".to_string(),
+            ]
+        );
     }
 
     #[test]

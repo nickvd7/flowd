@@ -152,6 +152,16 @@ pub struct StoredAutomationRun {
     pub undo_payload_json: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalUsageStats {
+    pub pattern_count: usize,
+    pub suggestion_count: usize,
+    pub approved_automation_count: usize,
+    pub automation_run_count: usize,
+    pub undo_run_count: usize,
+    pub estimated_time_saved_ms: i64,
+}
+
 pub fn insert_raw_event(conn: &Connection, event: &RawEvent) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO raw_events (ts, source, payload_json) VALUES (?1, ?2, ?3)",
@@ -992,6 +1002,38 @@ pub fn list_automation_runs(conn: &Connection) -> rusqlite::Result<Vec<StoredAut
     rows.collect()
 }
 
+pub fn load_local_usage_stats(conn: &Connection) -> rusqlite::Result<LocalUsageStats> {
+    conn.query_row(
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM patterns),
+            (SELECT COUNT(*) FROM suggestions),
+            (SELECT COUNT(*) FROM automations),
+            (SELECT COUNT(*) FROM automation_runs WHERE result = 'completed'),
+            (SELECT COUNT(*) FROM automation_runs WHERE result = 'undone'),
+            COALESCE((
+                SELECT SUM(patterns.avg_duration_ms)
+                FROM automation_runs
+                INNER JOIN automations ON automations.id = automation_runs.automation_id
+                INNER JOIN suggestions ON suggestions.id = automations.suggestion_id
+                INNER JOIN patterns ON patterns.id = suggestions.pattern_id
+                WHERE automation_runs.result = 'completed'
+            ), 0)
+        "#,
+        [],
+        |row| {
+            Ok(LocalUsageStats {
+                pattern_count: row.get::<_, i64>(0)? as usize,
+                suggestion_count: row.get::<_, i64>(1)? as usize,
+                approved_automation_count: row.get::<_, i64>(2)? as usize,
+                automation_run_count: row.get::<_, i64>(3)? as usize,
+                undo_run_count: row.get::<_, i64>(4)? as usize,
+                estimated_time_saved_ms: row.get(5)?,
+            })
+        },
+    )
+}
+
 pub fn load_automation_run(
     conn: &Connection,
     run_id: i64,
@@ -1543,6 +1585,130 @@ mod tests {
                 last_rejected_ts: Some("2026-03-11T11:20:00+00:00".to_string()),
                 last_snoozed_ts: Some("2026-03-11T11:30:00+00:00".to_string()),
             }]
+        );
+    }
+
+    #[test]
+    fn local_usage_stats_are_zero_for_an_empty_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let stats = load_local_usage_stats(&conn).unwrap();
+
+        assert_eq!(
+            stats,
+            LocalUsageStats {
+                pattern_count: 0,
+                suggestion_count: 0,
+                approved_automation_count: 0,
+                automation_run_count: 0,
+                undo_run_count: 0,
+                estimated_time_saved_ms: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn local_usage_stats_aggregate_patterns_suggestions_approvals_and_runs() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let invoice_pattern_id = insert_pattern(
+            &conn,
+            "CreateFile:invoice",
+            3,
+            30_000,
+            "CreateFile -> RenameFile",
+            "2026-03-11T09:00:00Z",
+            1.0,
+            0.8,
+        )
+        .unwrap();
+        let report_pattern_id = insert_pattern(
+            &conn,
+            "CreateFile:report",
+            2,
+            45_000,
+            "CreateFile -> MoveFile",
+            "2026-03-11T10:00:00Z",
+            1.0,
+            0.7,
+        )
+        .unwrap();
+
+        let invoice_suggestion_id = insert_suggestion(
+            &conn,
+            invoice_pattern_id,
+            "Repeated invoice file workflow detected",
+            "2026-03-11T10:00:00Z",
+            0.8,
+        )
+        .unwrap();
+        insert_suggestion(
+            &conn,
+            report_pattern_id,
+            "Repeated report file workflow detected",
+            "2026-03-11T11:00:00Z",
+            0.7,
+        )
+        .unwrap();
+
+        let automation_id = insert_automation(
+            &conn,
+            invoice_suggestion_id,
+            "id: invoice\ntrigger: {}\nactions: []\n",
+            AUTOMATION_STATUS_ACTIVE,
+            "Invoice automation",
+            "2026-03-11T12:00:00Z",
+        )
+        .unwrap();
+
+        insert_automation_run(
+            &conn,
+            &AutomationRunRecord {
+                automation_id,
+                started_at: "2026-03-11T12:10:00Z",
+                finished_at: "2026-03-11T12:10:05Z",
+                result: "completed",
+                undo_payload_json: Some("{\"operations\":[]}"),
+            },
+        )
+        .unwrap();
+        insert_automation_run(
+            &conn,
+            &AutomationRunRecord {
+                automation_id,
+                started_at: "2026-03-11T12:20:00Z",
+                finished_at: "2026-03-11T12:20:01Z",
+                result: "dry_run",
+                undo_payload_json: Some("{\"operations\":[]}"),
+            },
+        )
+        .unwrap();
+        insert_automation_run(
+            &conn,
+            &AutomationRunRecord {
+                automation_id,
+                started_at: "2026-03-11T12:30:00Z",
+                finished_at: "2026-03-11T12:30:02Z",
+                result: "undone",
+                undo_payload_json: Some("{\"kind\":\"undo\"}"),
+            },
+        )
+        .unwrap();
+
+        let stats = load_local_usage_stats(&conn).unwrap();
+
+        assert_eq!(
+            stats,
+            LocalUsageStats {
+                pattern_count: 2,
+                suggestion_count: 2,
+                approved_automation_count: 1,
+                automation_run_count: 1,
+                undo_run_count: 1,
+                estimated_time_saved_ms: 30_000,
+            }
         );
     }
 }
