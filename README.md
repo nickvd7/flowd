@@ -150,7 +150,9 @@ flowctl stats
 flowctl patterns
 flowctl sessions
 flowctl watch
-flowctl watch --category events
+flowctl watch --events
+flowctl watch --patterns
+flowctl watch --suggestions
 flowctl suggestions
 flowctl suggestions --explain
 flowctl suggestions explain <suggestion_id>
