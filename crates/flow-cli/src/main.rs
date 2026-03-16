@@ -35,6 +35,7 @@ use std::{
     fmt::Display,
     fs,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     thread,
     time::Duration,
 };
@@ -98,6 +99,8 @@ struct Cli {
 enum Commands {
     #[command(about = "Show flowd status")]
     Status,
+    #[command(about = "Run lightweight local health checks for flowd")]
+    Doctor,
     #[command(about = "Create or update a local flowd config")]
     Setup {
         #[arg(long = "watch", value_name = "PATH")]
@@ -258,6 +261,7 @@ fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Status) => println!("flowd status: template skeleton"),
+        Some(Commands::Doctor) => render_doctor(&context)?,
         Some(Commands::Setup { .. }) => unreachable!("setup is handled before runtime config"),
         Some(Commands::Config { command }) => render_config_command(&context, command)?,
         Some(Commands::Stats) => render_stats(&context)?,
@@ -592,6 +596,192 @@ fn render_stats(context: &RuntimeContext) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorReport {
+    daemon: String,
+    database: String,
+    watch_paths: String,
+    events_observed: String,
+    patterns_detected: String,
+    suggestions_available: String,
+    automations: String,
+    intelligence_layer: String,
+}
+
+fn render_doctor(context: &RuntimeContext) -> anyhow::Result<()> {
+    for line in render_doctor_report(&doctor_report(context)) {
+        println!("{line}");
+    }
+
+    Ok(())
+}
+
+fn doctor_report(context: &RuntimeContext) -> DoctorReport {
+    let config = &context.loaded_config.config;
+    let daemon = if is_doctor_daemon_running() {
+        "running".to_string()
+    } else {
+        "not running".to_string()
+    };
+
+    let watch_paths = if configured_watch_paths(config).is_empty() {
+        "not configured".to_string()
+    } else {
+        "configured".to_string()
+    };
+
+    let intelligence_layer = if config.intelligence_enabled {
+        match NoopIntelligenceClient.evaluate(&default_intelligence_request()) {
+            Ok(_) => "connected".to_string(),
+            Err(error) => format!("unavailable ({error})"),
+        }
+    } else {
+        "disabled".to_string()
+    };
+
+    match open_doctor_database(context) {
+        Ok(conn) => {
+            let events_observed = doctor_has_rows(&conn, "raw_events")
+                .map(render_yes_no)
+                .unwrap_or_else(|error| format!("unknown ({error})"));
+            let patterns_detected = doctor_has_active_patterns(&conn)
+                .map(render_yes_no)
+                .unwrap_or_else(|error| format!("unknown ({error})"));
+            let suggestions_available = list_suggestions(&conn)
+                .map(|suggestions| render_yes_no(!suggestions.is_empty()))
+                .unwrap_or_else(|error| format!("unknown ({error})"));
+            let automations = list_automations(&conn)
+                .map(|automations| {
+                    let active = automations
+                        .iter()
+                        .filter(|automation| automation.status == "active")
+                        .count();
+                    if active == 0 {
+                        "none active".to_string()
+                    } else if active == 1 {
+                        "1 active".to_string()
+                    } else {
+                        format!("{active} active")
+                    }
+                })
+                .unwrap_or_else(|error| format!("unknown ({error})"));
+
+            DoctorReport {
+                daemon,
+                database: "ok".to_string(),
+                watch_paths,
+                events_observed,
+                patterns_detected,
+                suggestions_available,
+                automations,
+                intelligence_layer,
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            DoctorReport {
+                daemon,
+                database: format!("error ({message})"),
+                watch_paths,
+                events_observed: "unknown".to_string(),
+                patterns_detected: "unknown".to_string(),
+                suggestions_available: "unknown".to_string(),
+                automations: "unknown".to_string(),
+                intelligence_layer,
+            }
+        }
+    }
+}
+
+fn render_doctor_report(report: &DoctorReport) -> Vec<String> {
+    vec![
+        format!("daemon: {}", report.daemon),
+        format!("database: {}", report.database),
+        format!("watch paths: {}", report.watch_paths),
+        format!("events observed: {}", report.events_observed),
+        format!("patterns detected: {}", report.patterns_detected),
+        format!("suggestions available: {}", report.suggestions_available),
+        format!("automations: {}", report.automations),
+        format!("intelligence layer: {}", report.intelligence_layer),
+    ]
+}
+
+fn configured_watch_paths(config: &Config) -> Vec<PathBuf> {
+    config
+        .observed_folders
+        .iter()
+        .map(|folder| expand_home(folder))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+fn open_doctor_database(context: &RuntimeContext) -> anyhow::Result<rusqlite::Connection> {
+    let db_path = std::env::var("FLOWD_DB_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| context.loaded_config.config.database_path.clone());
+    let db_path = expand_home(&db_path);
+    rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .with_context(|| format!("failed to open database at {}", db_path.display()))
+}
+
+fn doctor_has_rows(conn: &rusqlite::Connection, table: &str) -> anyhow::Result<bool> {
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)");
+    let exists = conn.query_row(&sql, [], |row| row.get::<_, i64>(0))?;
+    Ok(exists != 0)
+}
+
+fn doctor_has_active_patterns(conn: &rusqlite::Connection) -> anyhow::Result<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM patterns WHERE is_active = 1 LIMIT 1)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(exists != 0)
+}
+
+fn render_yes_no(value: bool) -> String {
+    if value {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    }
+}
+
+fn default_intelligence_request() -> flow_analysis::intelligence_boundary::IntelligenceRequest {
+    flow_analysis::intelligence_boundary::IntelligenceRequest {
+        context: Default::default(),
+        candidates: Vec::new(),
+    }
+}
+
+fn is_doctor_daemon_running() -> bool {
+    if let Some(value) = std::env::var("FLOWD_DOCTOR_DAEMON_RUNNING")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+    {
+        return matches!(value.as_str(), "1" | "true" | "yes");
+    }
+
+    let output = match ProcessCommand::new("ps").args(["-axo", "comm="]).output() {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| line == "flow-daemon" || line.ends_with("/flow-daemon"))
 }
 
 fn render_suggestions_table(context: &RuntimeContext, explain: bool) -> anyhow::Result<()> {
