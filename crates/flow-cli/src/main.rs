@@ -11,13 +11,14 @@ use flow_analysis::intelligence_boundary::{
 use flow_core::config::{
     expand_home, preferred_setup_config_path, Config, ConfigSource, LoadedConfig,
 };
+use flow_core::events::{ActionType, NormalizedEvent};
 use flow_db::{
     open_database,
     repo::{
         get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
         list_all_suggestion_records, list_automations, list_patterns, list_raw_events_after,
-        list_recent_sessions, list_sessions, list_suggestions,
-        list_suggestions_for_export, load_local_usage_stats, set_suggestion_status,
+        list_recent_sessions, list_sessions, list_suggestions, list_suggestions_for_export,
+        load_example_events_for_pattern, load_local_usage_stats, set_suggestion_status,
         LocalUsageStats, StoredPattern, StoredRawEvent, StoredSession, StoredSuggestion,
         StoredSuggestionForExport, StoredSuggestionRecord,
     },
@@ -738,11 +739,8 @@ fn open_doctor_database(context: &RuntimeContext) -> anyhow::Result<rusqlite::Co
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| context.loaded_config.config.database_path.clone());
     let db_path = expand_home(&db_path);
-    rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .with_context(|| format!("failed to open database at {}", db_path.display()))
+    rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open database at {}", db_path.display()))
 }
 
 fn doctor_has_rows(conn: &rusqlite::Connection, table: &str) -> anyhow::Result<bool> {
@@ -1630,11 +1628,8 @@ fn open_watch_database(context: &RuntimeContext) -> anyhow::Result<rusqlite::Con
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| context.loaded_config.config.database_path.clone());
     let db_path = expand_home(&db_path);
-    rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .with_context(|| format!("failed to open database at {}", db_path.display()))
+    rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open database at {}", db_path.display()))
 }
 
 fn suggestion_display_results(
@@ -1674,6 +1669,7 @@ struct ResolvedSuggestionExplanation {
     suggestion: StoredSuggestion,
     action: SuggestionDecisionAction,
     explainability: SuggestionExplainability,
+    example_events: Vec<NormalizedEvent>,
 }
 
 fn resolve_suggestion_explanation(
@@ -1688,11 +1684,14 @@ fn resolve_suggestion_explanation(
         .find(|suggestion| suggestion.suggestion_id == suggestion_id)
         .cloned()
     {
+        let example_events = load_example_events_for_pattern(conn, suggestion.pattern_id)
+            .context("failed to load stored workflow evidence")?;
         let explainability = if should_bypass_intelligence_ranking(&context.loaded_config.config) {
             ResolvedSuggestionExplanation {
                 action: SuggestionDecisionAction::Keep,
                 explainability: baseline_fallback_explainability(suggestion.usefulness_score),
                 suggestion,
+                example_events,
             }
         } else {
             IntelligenceBoundary::new(intelligence_client)
@@ -1703,6 +1702,7 @@ fn resolve_suggestion_explanation(
                     suggestion: result.suggestion,
                     action: result.action,
                     explainability: result.explainability,
+                    example_events: example_events.clone(),
                 })
                 .expect("evaluated suggestion must exist in display results")
         };
@@ -1727,58 +1727,38 @@ fn render_suggestion_explanation_report(
     preview: &AutomationPreview,
 ) -> Vec<String> {
     let suggestion = &resolved.suggestion;
-    let explainability = &resolved.explainability;
     let mut lines = vec![
-        format!("suggestion: {}", suggestion.suggestion_id),
-        "status: pending".to_string(),
-        format!("decision: {}", render_decision_action(resolved.action)),
+        format!("Suggestion: {}", suggestion.proposal_text),
+        String::new(),
+        "Why this suggestion appeared:".to_string(),
+        String::new(),
+        format!("pattern repetitions: {}", suggestion.count),
+        format!("last seen: {}", format_timestamp(&suggestion.last_seen_at)),
         format!(
-            "source: {}",
-            render_explainability_source(explainability.source)
+            "confidence: {} ({:.3})",
+            render_confidence_label(suggestion.usefulness_score),
+            suggestion.usefulness_score
         ),
-        format!("pattern: {}", suggestion.canonical_summary),
-        format!("proposal: {}", suggestion.proposal_text),
-        format!("score: {:.3}", suggestion.usefulness_score),
-        format!("freshness: {}", suggestion.freshness),
-        format!("last_seen: {}", format_timestamp(&suggestion.last_seen_at)),
-        format!("summary: {}", explainability.summary),
         format!(
-            "rank: {}",
-            explainability
-                .rank_hint
-                .map(|value| (value + 1).to_string())
-                .unwrap_or_else(|| "baseline".to_string())
+            "estimated time saved: ~{}",
+            render_estimated_time_saved(suggestion.avg_duration_ms)
         ),
     ];
 
-    if !explainability.score_breakdown.is_empty() {
-        lines.push("score_breakdown:".to_string());
-        lines.extend(
-            explainability
-                .score_breakdown
-                .iter()
-                .map(|component| format!("  {}={:.3}", component.label, component.value)),
-        );
+    let workflow_lines = render_observed_workflow(&resolved.example_events);
+    lines.push(String::new());
+    lines.push("Observed workflow:".to_string());
+    if workflow_lines.is_empty() {
+        lines.push("- no stored workflow steps available".to_string());
+    } else {
+        lines.extend(workflow_lines.into_iter().map(|line| format!("- {line}")));
     }
 
-    if let Some(reason) = &explainability.timing_reason {
-        lines.push(format!("timing_reason: {reason}"));
-    }
-
-    if let Some(reason) = &explainability.suppression_reason {
-        lines.push(format!("suppression_reason: {reason}"));
-    }
-
-    if !explainability.ranking_factors.is_empty() {
-        lines.push("ranking_factors:".to_string());
-        lines.extend(
-            explainability
-                .ranking_factors
-                .iter()
-                .map(|factor| format!("  {}={}", factor.label, factor.detail)),
-        );
-    }
-
+    lines.push(String::new());
+    lines.push("Stored metadata:".to_string());
+    lines.push(format!("pattern: {}", suggestion.canonical_summary));
+    lines.push("status: pending".to_string());
+    lines.push(format!("freshness: {}", suggestion.freshness));
     lines.push(format!(
         "feedback: shown={}, accepted={}, rejected={}, snoozed={}",
         suggestion.shown_count,
@@ -1787,17 +1767,18 @@ fn render_suggestion_explanation_report(
         suggestion.snoozed_count
     ));
 
-    if let Some(value) = &suggestion.last_shown_ts {
-        lines.push(format!("last_shown: {}", format_timestamp(value)));
+    if resolved.action != SuggestionDecisionAction::Keep {
+        lines.push(format!(
+            "decision: {}",
+            render_decision_action(resolved.action)
+        ));
     }
-    if let Some(value) = &suggestion.last_accepted_ts {
-        lines.push(format!("last_accepted: {}", format_timestamp(value)));
-    }
-    if let Some(value) = &suggestion.last_rejected_ts {
-        lines.push(format!("last_rejected: {}", format_timestamp(value)));
-    }
-    if let Some(value) = &suggestion.last_snoozed_ts {
-        lines.push(format!("last_snoozed: {}", format_timestamp(value)));
+
+    if resolved.explainability.source != ExplainabilitySource::BaselineFallback {
+        lines.push(format!(
+            "display source: {}",
+            render_explainability_source(resolved.explainability.source)
+        ));
     }
 
     lines.push(String::new());
@@ -1883,6 +1864,117 @@ fn render_decision_action(action: SuggestionDecisionAction) -> &'static str {
         SuggestionDecisionAction::Keep => "shown",
         SuggestionDecisionAction::Delay => "delayed",
         SuggestionDecisionAction::Suppress => "suppressed",
+    }
+}
+
+fn render_confidence_label(score: f64) -> &'static str {
+    match score {
+        score if score >= 0.8 => "high",
+        score if score >= 0.6 => "medium",
+        _ => "low",
+    }
+}
+
+fn render_estimated_time_saved(avg_duration_ms: i64) -> String {
+    if avg_duration_ms >= 60_000 {
+        let minutes = ((avg_duration_ms as f64) / 60_000.0).round() as i64;
+        return format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" });
+    }
+
+    format_duration(avg_duration_ms)
+}
+
+fn render_observed_workflow(events: &[NormalizedEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(render_observed_workflow_step)
+        .collect()
+}
+
+fn render_observed_workflow_step(event: &NormalizedEvent) -> Option<String> {
+    let terminal_command = event
+        .metadata
+        .get("source")
+        .and_then(|value| value.as_str())
+        .filter(|source| *source == "terminal")
+        .and_then(|_| event.metadata.get("redacted_command"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty());
+    if let Some(command) = terminal_command {
+        return Some(command.to_string());
+    }
+
+    let target = event.target.as_deref()?;
+    let from_path = event
+        .metadata
+        .get("from_path")
+        .and_then(|value| value.as_str());
+
+    match event.action_type {
+        ActionType::CreateFile | ActionType::DownloadFile => {
+            Some(format!("create {}", render_path_for_workflow(target)))
+        }
+        ActionType::RenameFile => Some(format!(
+            "rename {} -> {}",
+            from_path
+                .map(render_path_for_workflow)
+                .unwrap_or_else(|| "file".to_string()),
+            render_path_for_workflow(target)
+        )),
+        ActionType::MoveFile => Some(format!(
+            "move {} -> {}",
+            from_path
+                .map(render_path_for_workflow)
+                .unwrap_or_else(|| "file".to_string()),
+            render_path_for_workflow(target)
+        )),
+        _ => None,
+    }
+}
+
+fn render_path_for_workflow(path: &str) -> String {
+    let display = compact_home_path(path);
+    let path = Path::new(&display);
+    let file_name = path.file_name().and_then(|value| value.to_str());
+
+    match file_name {
+        Some(name) if matches!(path.parent().and_then(|value| value.to_str()), Some(".")) => {
+            name.to_string()
+        }
+        Some(name) => {
+            if let Some(parent) = path.parent().and_then(|value| value.to_str()) {
+                if parent.is_empty() {
+                    return name.to_string();
+                }
+                return format!("{name} ({parent})");
+            }
+            name.to_string()
+        }
+        None => display,
+    }
+}
+
+fn compact_home_path(path: &str) -> String {
+    let Some(home) = std::env::var_os("HOME") else {
+        return path.to_string();
+    };
+    let home = PathBuf::from(home);
+    let path_buf = Path::new(path);
+
+    if path_buf == home {
+        return "~".to_string();
+    }
+
+    match path_buf.strip_prefix(&home) {
+        Ok(relative) => {
+            let suffix = relative.display().to_string();
+            if suffix.is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", suffix)
+            }
+        }
+        Err(_) => path.to_string(),
     }
 }
 
@@ -2270,6 +2362,31 @@ mod tests {
         }
     }
 
+    fn sample_observed_workflow_events() -> Vec<NormalizedEvent> {
+        vec![
+            NormalizedEvent {
+                ts: Utc::now(),
+                action_type: ActionType::MoveFile,
+                app: Some("terminal".to_string()),
+                target: Some("/tmp/workspace/archive/report.txt".to_string()),
+                metadata: serde_json::json!({
+                    "source": "terminal",
+                    "redacted_command": "mv <path> <path>",
+                    "from_path": "/tmp/workspace/report.txt"
+                }),
+            },
+            NormalizedEvent {
+                ts: Utc::now(),
+                action_type: ActionType::RenameFile,
+                app: None,
+                target: Some("/tmp/workspace/final.txt".to_string()),
+                metadata: serde_json::json!({
+                    "from_path": "/tmp/workspace/draft.txt"
+                }),
+            },
+        ]
+    }
+
     #[test]
     fn display_ranking_uses_intelligence_when_available() {
         let suggestions = vec![
@@ -2524,18 +2641,21 @@ mod tests {
                     detail: "A more recent workflow was prioritized.".to_string(),
                 }],
             },
+            example_events: sample_observed_workflow_events(),
         };
 
         let lines = render_suggestion_explanation_report(&resolved, &sample_preview());
 
+        assert_eq!(lines[0], "Suggestion: Proposal for CreateFile:invoice-a");
+        assert!(lines.contains(&"pattern repetitions: 2".to_string()));
+        assert!(lines.contains(&"confidence: high (0.900)".to_string()));
+        assert!(lines.contains(&"estimated time saved: ~10s".to_string()));
+        assert!(lines.contains(&"- mv <path> <path>".to_string()));
+        assert!(lines.contains(
+            &"- rename draft.txt (/tmp/workspace) -> final.txt (/tmp/workspace)".to_string()
+        ));
         assert!(lines.contains(&"decision: delayed".to_string()));
-        assert!(lines.contains(&"source: intelligence".to_string()));
-        assert!(lines.contains(&"rank: 2".to_string()));
-        assert!(
-            lines.contains(&"timing_reason: A newer suggestion should be shown first.".to_string())
-        );
-        assert!(lines.contains(&"  recency_penalty=-0.200".to_string()));
-        assert!(lines.contains(&"  recency=A more recent workflow was prioritized.".to_string()));
+        assert!(lines.contains(&"display source: intelligence".to_string()));
     }
 
     #[test]
@@ -2559,14 +2679,14 @@ mod tests {
                     detail: "Similar suggestions were clustered.".to_string(),
                 }],
             },
+            example_events: Vec::new(),
         };
 
         let lines = render_suggestion_explanation_report(&resolved, &sample_preview());
 
         assert!(lines.contains(&"decision: suppressed".to_string()));
-        assert!(lines
-            .contains(&"suppression_reason: A similar suggestion is already active.".to_string()));
-        assert!(lines.contains(&"  clustering=Similar suggestions were clustered.".to_string()));
+        assert!(lines.contains(&"display source: intelligence".to_string()));
+        assert!(lines.contains(&"- no stored workflow steps available".to_string()));
     }
 
     #[test]
@@ -3094,7 +3214,10 @@ fn render_watch_raw_event(record: &StoredRawEvent) -> Option<String> {
                             .and_then(|value| value.as_str())
                     })
                     .unwrap_or("-");
-                Some(format!("[event] browser download: {}", abbreviate_home(path)))
+                Some(format!(
+                    "[event] browser download: {}",
+                    abbreviate_home(path)
+                ))
             }
             "visit" => {
                 let url = event

@@ -79,13 +79,15 @@ fn suggestions_explain_renders_deterministic_fallback_report_without_marking_dis
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("suggestion: 1"));
-    assert!(stdout.contains("decision: shown"));
-    assert!(stdout.contains("source: baseline fallback"));
-    assert!(stdout.contains("score_breakdown:"));
-    assert!(stdout.contains("  baseline_score="));
-    assert!(stdout.contains("ranking_factors:"));
-    assert!(stdout.contains("  fallback=No intelligence decision was applied."));
+    assert!(stdout.contains("Suggestion: Repeated invoice file workflow detected"));
+    assert!(stdout.contains("Why this suggestion appeared:"));
+    assert!(stdout.contains("pattern repetitions: 2"));
+    assert!(stdout.contains("confidence:"));
+    assert!(stdout.contains("estimated time saved:"));
+    assert!(stdout.contains("Observed workflow:"));
+    assert!(stdout.contains("rename"));
+    assert!(stdout.contains("move"));
+    assert!(stdout.contains("Stored metadata:"));
     assert!(stdout.contains("feedback: shown=0, accepted=0, rejected=0, snoozed=0"));
     assert!(stdout.contains("Automation preview"));
     assert!(stdout.contains("Examples:"));
