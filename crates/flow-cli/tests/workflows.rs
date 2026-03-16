@@ -6,7 +6,8 @@ use flow_db::{
     repo::{
         get_automation, insert_normalized_event_record, insert_raw_event,
         list_all_suggestion_records, list_automations, list_normalized_events, list_patterns,
-        list_pending_file_raw_events, list_raw_events_after, list_recent_sessions, list_suggestions,
+        list_pending_file_raw_events, list_raw_events_after, list_recent_sessions,
+        list_suggestions,
     },
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
