@@ -15,8 +15,8 @@ use flow_db::{
     open_database,
     repo::{
         get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
-        list_all_suggestion_records, list_automations, list_normalized_events_after, list_patterns,
-        list_raw_events_after, list_recent_sessions, list_sessions, list_suggestions,
+        list_all_suggestion_records, list_automations, list_patterns, list_raw_events_after,
+        list_recent_sessions, list_sessions, list_suggestions,
         list_suggestions_for_export, load_local_usage_stats, set_suggestion_status,
         LocalUsageStats, StoredPattern, StoredRawEvent, StoredSession, StoredSuggestion,
         StoredSuggestionForExport, StoredSuggestionRecord,
@@ -49,7 +49,8 @@ Examples:
   flowctl suggestions history
   flowctl approve 1
   flowctl automations show 1
-  flowctl watch";
+  flowctl watch
+  flowctl watch --events --patterns";
 
 const CONFIG_AFTER_HELP: &str = "\
 Examples:
@@ -150,6 +151,12 @@ enum Commands {
         visible_alias = "tail"
     )]
     Watch {
+        #[arg(long, help = "Show observed events")]
+        events: bool,
+        #[arg(long, help = "Show pattern changes")]
+        patterns: bool,
+        #[arg(long, help = "Show suggestion changes")]
+        suggestions: bool,
         #[arg(
             long = "category",
             value_name = "NAME",
@@ -285,10 +292,18 @@ fn run() -> anyhow::Result<()> {
             } => export_feedback_command(&context, &output, generated_at.as_deref())?,
         },
         Some(Commands::Watch {
+            events,
+            patterns,
+            suggestions,
             categories,
             poll_interval_ms,
             once,
-        }) => render_watch(&context, &categories, poll_interval_ms, once)?,
+        }) => render_watch(
+            &context,
+            &watch_category_filters(events, patterns, suggestions, &categories),
+            poll_interval_ms,
+            once,
+        )?,
         Some(Commands::Approve { suggestion_id }) => {
             approve_automation_command(&context, suggestion_id)?
         }
@@ -1128,7 +1143,6 @@ struct WatchSuggestionSnapshot {
 #[derive(Debug, Clone, Default)]
 struct WatchState {
     last_raw_event_id: i64,
-    last_normalized_event_id: i64,
     seen_sessions: BTreeSet<WatchSessionFingerprint>,
     patterns: BTreeMap<i64, WatchPatternSnapshot>,
     suggestions: BTreeMap<i64, WatchSuggestionSnapshot>,
@@ -1157,7 +1171,7 @@ fn render_watch(
     }
 
     loop {
-        let conn = open_cli_database(context)?;
+        let conn = open_watch_database(context)?;
         let lines = collect_watch_lines(&conn, &categories, &mut state)?;
         for line in lines {
             println!("{line}");
@@ -1174,10 +1188,8 @@ fn render_watch(
 }
 
 fn bootstrap_watch_state(context: &RuntimeContext) -> anyhow::Result<WatchState> {
-    let conn = open_cli_database(context)?;
+    let conn = open_watch_database(context)?;
     let raw_events = list_raw_events_after(&conn, 0).context("failed to read raw events")?;
-    let normalized_events =
-        list_normalized_events_after(&conn, 0).context("failed to read normalized events")?;
     let sessions = list_sessions(&conn).context("failed to read sessions")?;
     let patterns = list_patterns(&conn).context("failed to read patterns")?;
     let suggestions =
@@ -1185,7 +1197,6 @@ fn bootstrap_watch_state(context: &RuntimeContext) -> anyhow::Result<WatchState>
 
     Ok(WatchState {
         last_raw_event_id: raw_events.last().map(|event| event.id).unwrap_or(0),
-        last_normalized_event_id: normalized_events.last().map(|event| event.id).unwrap_or(0),
         seen_sessions: sessions
             .into_iter()
             .map(|session| watch_session_fingerprint(&session))
@@ -1219,18 +1230,7 @@ fn collect_watch_lines(
         if let Some(last) = raw_events.last() {
             state.last_raw_event_id = last.id;
         }
-        lines.extend(raw_events.iter().map(render_watch_raw_event));
-
-        let normalized_events = list_normalized_events_after(conn, state.last_normalized_event_id)
-            .context("failed to read normalized events")?;
-        if let Some(last) = normalized_events.last() {
-            state.last_normalized_event_id = last.id;
-        }
-        lines.extend(
-            normalized_events
-                .iter()
-                .map(|event| render_watch_normalized_event(&event.event)),
-        );
+        lines.extend(raw_events.iter().filter_map(render_watch_raw_event));
     }
 
     if categories.contains(&WatchCategory::Sessions) {
@@ -1283,7 +1283,6 @@ fn selected_watch_categories(categories: &[WatchCategory]) -> BTreeSet<WatchCate
     if categories.is_empty() {
         return [
             WatchCategory::Events,
-            WatchCategory::Sessions,
             WatchCategory::Patterns,
             WatchCategory::Suggestions,
         ]
@@ -1292,6 +1291,26 @@ fn selected_watch_categories(categories: &[WatchCategory]) -> BTreeSet<WatchCate
     }
 
     categories.iter().copied().collect()
+}
+
+fn watch_category_filters(
+    events: bool,
+    patterns: bool,
+    suggestions: bool,
+    categories: &[WatchCategory],
+) -> Vec<WatchCategory> {
+    let mut filters = Vec::new();
+    if events {
+        filters.push(WatchCategory::Events);
+    }
+    if patterns {
+        filters.push(WatchCategory::Patterns);
+    }
+    if suggestions {
+        filters.push(WatchCategory::Suggestions);
+    }
+    filters.extend_from_slice(categories);
+    filters
 }
 
 fn render_watch_category_list(categories: &BTreeSet<WatchCategory>) -> String {
@@ -1374,7 +1393,7 @@ fn render_watch_pattern_updated(
 }
 
 fn render_watch_suggestion_created(suggestion: &StoredSuggestionRecord) -> String {
-    format!("[suggestion] created: {}", suggestion.proposal_text)
+    format!("[suggestion] new: {}", suggestion.proposal_text)
 }
 
 fn render_watch_suggestion_updated(
@@ -1603,6 +1622,19 @@ fn open_cli_database(context: &RuntimeContext) -> anyhow::Result<rusqlite::Conne
     let db_path = expand_home(&db_path);
     open_database(&db_path)
         .with_context(|| format!("failed to open database at {}", db_path.display()))
+}
+
+fn open_watch_database(context: &RuntimeContext) -> anyhow::Result<rusqlite::Connection> {
+    let db_path = std::env::var("FLOWD_DB_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| context.loaded_config.config.database_path.clone());
+    let db_path = expand_home(&db_path);
+    rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .with_context(|| format!("failed to open database at {}", db_path.display()))
 }
 
 fn suggestion_display_results(
@@ -2567,14 +2599,32 @@ mod tests {
     }
 
     #[test]
-    fn watch_category_selection_defaults_to_all_categories_in_stable_order() {
+    fn watch_category_selection_defaults_to_daily_use_categories_in_stable_order() {
         let categories = selected_watch_categories(&[]);
 
         assert_eq!(
             categories.into_iter().collect::<Vec<_>>(),
             vec![
                 WatchCategory::Events,
-                WatchCategory::Sessions,
+                WatchCategory::Patterns,
+                WatchCategory::Suggestions,
+            ]
+        );
+    }
+
+    #[test]
+    fn watch_category_filters_include_explicit_flags_in_stable_order() {
+        let categories = selected_watch_categories(&watch_category_filters(
+            true,
+            false,
+            true,
+            &[WatchCategory::Patterns],
+        ));
+
+        assert_eq!(
+            categories.into_iter().collect::<Vec<_>>(),
+            vec![
+                WatchCategory::Events,
                 WatchCategory::Patterns,
                 WatchCategory::Suggestions,
             ]
@@ -2598,7 +2648,10 @@ mod tests {
 
         assert_eq!(
             render_watch_raw_event(&record),
-            "[event] file rename: /tmp/downloads/invoice-1001.pdf -> /tmp/archive/invoice-1001.pdf"
+            Some(
+                "[event] rename: /tmp/downloads/invoice-1001.pdf -> /tmp/archive/invoice-1001.pdf"
+                    .to_string()
+            )
         );
     }
 
@@ -2976,7 +3029,7 @@ where
         .join(" | ")
 }
 
-fn render_watch_raw_event(record: &StoredRawEvent) -> String {
+fn render_watch_raw_event(record: &StoredRawEvent) -> Option<String> {
     let event = &record.event;
     match event.source {
         flow_core::events::EventSource::FileWatcher => {
@@ -2996,13 +3049,17 @@ fn render_watch_raw_event(record: &StoredRawEvent) -> String {
                 .and_then(|value| value.as_str());
 
             match (kind, from_path) {
-                ("rename", Some(from_path)) | ("move", Some(from_path)) => format!(
-                    "[event] file {kind}: {} -> {}",
+                ("rename", Some(from_path)) | ("move", Some(from_path)) => Some(format!(
+                    "[event] {kind}: {} -> {}",
                     abbreviate_home(from_path),
                     abbreviate_home(path)
-                ),
-                ("create", _) => format!("[event] file created: {}", abbreviate_home(path)),
-                _ => format!("[event] file {kind}: {}", abbreviate_home(path)),
+                )),
+                ("create", _) => Some(format!("[event] file created: {}", abbreviate_home(path))),
+                ("remove", _) | ("delete", _) => {
+                    Some(format!("[event] file removed: {}", abbreviate_home(path)))
+                }
+                ("write" | "modify" | "access", _) => None,
+                _ => Some(format!("[event] file {kind}: {}", abbreviate_home(path))),
             }
         }
         flow_core::events::EventSource::Terminal => {
@@ -3016,21 +3073,9 @@ fn render_watch_raw_event(record: &StoredRawEvent) -> String {
                 .get("kind")
                 .and_then(|value| value.as_str())
                 .unwrap_or("command");
-            format!("[event] terminal {kind}: {command}")
+            Some(format!("[event] terminal {kind}: {command}"))
         }
-        flow_core::events::EventSource::Clipboard => {
-            let category = event
-                .payload
-                .get("category")
-                .and_then(|value| value.as_str())
-                .unwrap_or("text");
-            let length = event
-                .payload
-                .get("content_length")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            format!("[event] clipboard changed: {category} ({length} bytes)")
-        }
+        flow_core::events::EventSource::Clipboard => None,
         flow_core::events::EventSource::Browser => match event
             .payload
             .get("kind")
@@ -3049,7 +3094,7 @@ fn render_watch_raw_event(record: &StoredRawEvent) -> String {
                             .and_then(|value| value.as_str())
                     })
                     .unwrap_or("-");
-                format!("[event] browser download: {}", abbreviate_home(path))
+                Some(format!("[event] browser download: {}", abbreviate_home(path)))
             }
             "visit" => {
                 let url = event
@@ -3057,36 +3102,12 @@ fn render_watch_raw_event(record: &StoredRawEvent) -> String {
                     .get("url")
                     .and_then(|value| value.as_str())
                     .unwrap_or("-");
-                format!("[event] browser visit: {url}")
+                Some(format!("[event] browser visit: {url}"))
             }
-            kind => format!("[event] browser {kind}"),
+            _ => None,
         },
-        flow_core::events::EventSource::ActiveWindow => {
-            let app = event
-                .payload
-                .get("app")
-                .and_then(|value| value.as_str())
-                .unwrap_or("window");
-            let title = event
-                .payload
-                .get("title")
-                .and_then(|value| value.as_str())
-                .unwrap_or("-");
-            format!("[event] active window: {app} | {title}")
-        }
+        flow_core::events::EventSource::ActiveWindow => None,
     }
-}
-
-fn render_watch_normalized_event(event: &flow_core::events::NormalizedEvent) -> String {
-    let label = render_action_label(&format!("{:?}", event.action_type));
-    let target = event
-        .target
-        .as_deref()
-        .map(abbreviate_home)
-        .unwrap_or_else(|| "-".to_string());
-    let app = event.app.as_deref().unwrap_or("system");
-
-    format!("[normalized] {label}: {target} ({app})")
 }
 
 fn render_action_label(action: &str) -> String {

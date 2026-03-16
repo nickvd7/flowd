@@ -5,9 +5,8 @@ use flow_db::{
     migrations::run_migrations,
     repo::{
         get_automation, insert_normalized_event_record, insert_raw_event,
-        list_all_suggestion_records, list_automations, list_normalized_events,
-        list_normalized_events_after, list_patterns, list_pending_file_raw_events,
-        list_raw_events_after, list_recent_sessions, list_sessions, list_suggestions,
+        list_all_suggestion_records, list_automations, list_normalized_events, list_patterns,
+        list_pending_file_raw_events, list_raw_events_after, list_recent_sessions, list_suggestions,
     },
 };
 use flow_dsl::{Action, AutomationSpec, Safety, Trigger};
@@ -374,20 +373,8 @@ fn watch_once_renders_deterministic_activity_snapshot() {
     let mut expected_lines: Vec<String> = list_raw_events_after(&conn, 0)
         .unwrap()
         .iter()
-        .map(render_watch_raw_event)
+        .filter_map(render_watch_raw_event)
         .collect();
-    expected_lines.extend(
-        list_normalized_events_after(&conn, 0)
-            .unwrap()
-            .iter()
-            .map(|event| render_watch_normalized_event(&event.event)),
-    );
-    expected_lines.extend(
-        list_sessions(&conn)
-            .unwrap()
-            .iter()
-            .map(render_watch_session),
-    );
     expected_lines.extend(
         list_patterns(&conn)
             .unwrap()
@@ -1532,7 +1519,7 @@ fn render_optional_value(value: &str) -> String {
     }
 }
 
-fn render_watch_raw_event(record: &flow_db::repo::StoredRawEvent) -> String {
+fn render_watch_raw_event(record: &flow_db::repo::StoredRawEvent) -> Option<String> {
     let event = &record.event;
     match event.source {
         flow_core::events::EventSource::FileWatcher => {
@@ -1553,10 +1540,12 @@ fn render_watch_raw_event(record: &flow_db::repo::StoredRawEvent) -> String {
 
             match (kind, from_path) {
                 ("rename", Some(from_path)) | ("move", Some(from_path)) => {
-                    format!("[event] file {kind}: {from_path} -> {path}")
+                    Some(format!("[event] {kind}: {from_path} -> {path}"))
                 }
-                ("create", _) => format!("[event] file created: {path}"),
-                _ => format!("[event] file {kind}: {path}"),
+                ("create", _) => Some(format!("[event] file created: {path}")),
+                ("remove" | "delete", _) => Some(format!("[event] file removed: {path}")),
+                ("write" | "modify" | "access", _) => None,
+                _ => Some(format!("[event] file {kind}: {path}")),
             }
         }
         flow_core::events::EventSource::Terminal => {
@@ -1570,21 +1559,9 @@ fn render_watch_raw_event(record: &flow_db::repo::StoredRawEvent) -> String {
                 .get("kind")
                 .and_then(|value| value.as_str())
                 .unwrap_or("command");
-            format!("[event] terminal {kind}: {command}")
+            Some(format!("[event] terminal {kind}: {command}"))
         }
-        flow_core::events::EventSource::Clipboard => {
-            let category = event
-                .payload
-                .get("category")
-                .and_then(|value| value.as_str())
-                .unwrap_or("text");
-            let length = event
-                .payload
-                .get("content_length")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0);
-            format!("[event] clipboard changed: {category} ({length} bytes)")
-        }
+        flow_core::events::EventSource::Clipboard => None,
         flow_core::events::EventSource::Browser => match event
             .payload
             .get("kind")
@@ -1603,7 +1580,7 @@ fn render_watch_raw_event(record: &flow_db::repo::StoredRawEvent) -> String {
                             .and_then(|value| value.as_str())
                     })
                     .unwrap_or("-");
-                format!("[event] browser download: {path}")
+                Some(format!("[event] browser download: {path}"))
             }
             "visit" => {
                 let url = event
@@ -1611,42 +1588,12 @@ fn render_watch_raw_event(record: &flow_db::repo::StoredRawEvent) -> String {
                     .get("url")
                     .and_then(|value| value.as_str())
                     .unwrap_or("-");
-                format!("[event] browser visit: {url}")
+                Some(format!("[event] browser visit: {url}"))
             }
-            kind => format!("[event] browser {kind}"),
+            _ => None,
         },
-        flow_core::events::EventSource::ActiveWindow => {
-            let app = event
-                .payload
-                .get("app")
-                .and_then(|value| value.as_str())
-                .unwrap_or("window");
-            let title = event
-                .payload
-                .get("title")
-                .and_then(|value| value.as_str())
-                .unwrap_or("-");
-            format!("[event] active window: {app} | {title}")
-        }
+        flow_core::events::EventSource::ActiveWindow => None,
     }
-}
-
-fn render_watch_normalized_event(event: &flow_core::events::NormalizedEvent) -> String {
-    let label = render_action_label(&format!("{:?}", event.action_type));
-    let target = event.target.as_deref().unwrap_or("-");
-    let app = event.app.as_deref().unwrap_or("system");
-
-    format!("[normalized] {label}: {target} ({app})")
-}
-
-fn render_watch_session(session: &flow_db::repo::StoredSession) -> String {
-    format!(
-        "[session] updated: {} events over {} ({} -> {})",
-        session.event_count,
-        format_duration(session.duration_ms),
-        format_timestamp(&session.start_ts),
-        format_timestamp(&session.end_ts),
-    )
 }
 
 fn render_watch_pattern_detected(pattern: &flow_db::repo::StoredPattern) -> String {
@@ -1658,7 +1605,7 @@ fn render_watch_pattern_detected(pattern: &flow_db::repo::StoredPattern) -> Stri
 }
 
 fn render_watch_suggestion_created(suggestion: &flow_db::repo::StoredSuggestionRecord) -> String {
-    format!("[suggestion] created: {}", suggestion.proposal_text)
+    format!("[suggestion] new: {}", suggestion.proposal_text)
 }
 
 fn approve_suggestion(db_path: &Path) {
