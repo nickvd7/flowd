@@ -1,0 +1,9 @@
+[pack]
+id = "demo.rename-downloads"
+name = "Demo Rename Downloads"
+version = "0.1.0"
+description = "Example pack with a single automation for renaming downloads."
+
+automation = [
+  { file = "automations/rename-downloads.yaml" }
+]

@@ -23,7 +23,7 @@ use flow_db::{
         StoredSuggestionForExport, StoredSuggestionRecord,
     },
 };
-use flow_dsl::{Action, AutomationSpec};
+use flow_dsl::{Action, AutomationSpec, WorkflowPackManifest};
 use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
     execute_automation, list_runs, preview_automation, preview_suggestion, undo_automation_run,
@@ -139,6 +139,11 @@ enum Commands {
     },
     #[command(about = "List recent workflow sessions")]
     Sessions,
+    #[command(about = "Manage local workflow packs")]
+    Packs {
+        #[command(subcommand)]
+        command: Option<PacksCommand>,
+    },
     #[command(
         about = "Export local intelligence evaluation facts and feedback",
         after_help = INTELLIGENCE_AFTER_HELP
@@ -216,6 +221,14 @@ enum AutomationsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum PacksCommand {
+    #[command(about = "List installed workflow packs")]
+    List,
+    #[command(about = "Validate a workflow pack directory")]
+    Validate { path: PathBuf },
+}
+
+#[derive(Debug, Subcommand)]
 enum IntelligenceCommand {
     #[command(about = "Export suggestion feedback and evaluation context to a local JSON file")]
     ExportFeedback {
@@ -286,6 +299,10 @@ fn run() -> anyhow::Result<()> {
             None => render_suggestions_table(&context, explain)?,
         },
         Some(Commands::Sessions) => render_sessions(&context)?,
+        Some(Commands::Packs { command }) => match command.unwrap_or(PacksCommand::List) {
+            PacksCommand::List => render_packs_list(&context)?,
+            PacksCommand::Validate { path } => validate_pack_command(&path)?,
+        },
         Some(Commands::Intelligence { command }) => match command {
             IntelligenceCommand::ExportFeedback {
                 output,
@@ -466,6 +483,63 @@ fn render_next_steps(steps: &[String]) -> Vec<String> {
             .map(|(index, step)| format!("{}. {step}", index + 1)),
     );
     lines
+}
+
+fn render_packs_list(_context: &RuntimeContext) -> anyhow::Result<()> {
+    // v0.1: placeholder until we add a persistent pack registry.
+    println!("No workflow packs are installed yet.");
+    println!("Use 'flowctl packs validate <path>' to validate a local pack folder.");
+    Ok(())
+}
+
+fn validate_pack_command(pack_dir: &Path) -> anyhow::Result<()> {
+    let manifest_path = pack_dir.join("workflow-pack.toml");
+    let manifest_str = fs::read_to_string(&manifest_path).with_context(|| {
+        format!("failed to read workflow pack manifest at {}", manifest_path.display())
+    })?;
+
+    let manifest: WorkflowPackManifest = flow_dsl::parse_pack_manifest(&manifest_str)
+        .with_context(|| format!("failed to parse manifest at {}", manifest_path.display()))?;
+
+    println!("Pack id: {}", manifest.pack.id);
+    println!("Name: {}", manifest.pack.name);
+    println!("Version: {}", manifest.pack.version);
+    if let Some(description) = manifest.pack.description.as_deref() {
+        println!("Description: {description}");
+    }
+    println!("Automations: {}", manifest.automation.len());
+    println!();
+
+    let mut had_error = false;
+
+    for automation_ref in &manifest.automation {
+        let spec_path = pack_dir.join(&automation_ref.file);
+        println!("Validating automation spec: {}", spec_path.display());
+        let yaml = match fs::read_to_string(&spec_path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                eprintln!("  error: failed to read spec: {error}");
+                had_error = true;
+                continue;
+            }
+        };
+
+        match flow_dsl::parse_spec(&yaml) {
+            Ok(spec) => {
+                println!("  ok: id='{}', actions={}", spec.id, spec.actions.len());
+            }
+            Err(error) => {
+                eprintln!("  error: failed to parse automation spec: {error}");
+                had_error = true;
+            }
+        }
+    }
+
+    if had_error {
+        anyhow::bail!("one or more automation specs failed validation");
+    }
+
+    Ok(())
 }
 
 fn shell_quote(path: &Path) -> String {

@@ -1,0 +1,12 @@
+id: rename-downloads
+trigger:
+  type: file
+  path: "~/Downloads"
+  extension: ".pdf"
+  name_contains: null
+actions:
+  - type: Rename
+    template: "invoices/{year}/{original_name}"
+safety:
+  dry_run_first: true
+  undo_log: true
