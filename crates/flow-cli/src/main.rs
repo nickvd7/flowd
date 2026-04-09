@@ -486,9 +486,75 @@ fn render_next_steps(steps: &[String]) -> Vec<String> {
 }
 
 fn render_packs_list(_context: &RuntimeContext) -> anyhow::Result<()> {
-    // v0.1: placeholder until we add a persistent pack registry.
-    println!("No workflow packs are installed yet.");
-    println!("Use 'flowctl packs validate <path>' to validate a local pack folder.");
+    // v0.1: list packs by scanning the standard config/packs directory.
+    let packs_root = match flow_core::config::standard_config_path() {
+        Some(config_path) => config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("packs"),
+        None => PathBuf::from("~/.config/flowd/packs"),
+    };
+
+    let packs_root = flow_core::config::expand_home(packs_root.to_string_lossy().as_ref());
+
+    if !packs_root.is_dir() {
+        println!("No workflow packs directory at {}", packs_root.display());
+        println!("Use 'flowctl packs validate <path>' to validate a local pack folder.");
+        return Ok(());
+    }
+
+    let mut found = 0usize;
+
+    for entry in fs::read_dir(&packs_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let pack_root = entry.path();
+        let manifest_path = pack_root.join("workflow-pack.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+
+        let manifest_str = match fs::read_to_string(&manifest_path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to read manifest at {}: {error}",
+                    manifest_path.display()
+                );
+                continue;
+            }
+        };
+
+        let manifest = match flow_dsl::parse_pack_manifest(&manifest_str) {
+            Ok(m) => m,
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to parse manifest at {}: {error}",
+                    manifest_path.display()
+                );
+                continue;
+            }
+        };
+
+        found += 1;
+        println!(
+            "{}\t{}\t{}\tautomations={}",
+            manifest.pack.id,
+            manifest.pack.name,
+            manifest.pack.version,
+            manifest.automation.len(),
+        );
+    }
+
+    if found == 0 {
+        println!(
+            "No workflow packs found in {}. Use 'flowctl packs validate <path>' to check a pack before installing.",
+            packs_root.display()
+        );
+    }
+
     Ok(())
 }
 
