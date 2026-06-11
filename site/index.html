@@ -365,7 +365,7 @@ flow-daemon</pre>
   <h2>contact</h2>
   <p class="section-sub">Questions, feedback, or want to get involved? Open a line — no daemon required.</p>
   <div class="form-status" id="form-status"></div>
-  <form class="contact-form" id="contact-form" action="https://formsubmit.co/mail@030.dev" method="POST">
+  <form class="contact-form" id="contact-form" action="https://formsubmit.co/c6a2152040d8d52588fa2e7c6969bb18" method="POST">
     <input type="hidden" name="_subject" value="[flowd.net] contact request">
     <input type="hidden" name="_template" value="table">
     <input type="hidden" name="_captcha" value="false">
@@ -385,7 +385,7 @@ flow-daemon</pre>
     </div>
     <div class="contact-actions">
       <button class="btn primary submit" type="submit" id="cf-submit">$ send --now</button>
-      <span class="contact-alt">or plain old email: <a href="mailto:mail@030.dev">mail@030.dev</a></span>
+      <span class="contact-alt">or plain old email: <a id="cf-mail" href="#contact">[click to reveal]</a></span>
     </div>
   </form>
 </section>
@@ -470,6 +470,16 @@ function showStatus(msg, isError) {
   status.classList.add("show");
 }
 
+// email link assembled at runtime to keep the address out of the page source
+const mailLink = document.getElementById("cf-mail");
+const addr = ["mail", "030.dev"].join("@");
+mailLink.addEventListener("click", function reveal(e) {
+  e.preventDefault();
+  mailLink.href = "mailto:" + addr;
+  mailLink.textContent = addr;
+  mailLink.removeEventListener("click", reveal);
+});
+
 if (new URLSearchParams(location.search).get("sent") === "1") {
   showStatus("✓ message sent — exit code 0. We'll get back to you soon.");
 }
@@ -481,7 +491,7 @@ form.addEventListener("submit", async (e) => {
   submitBtn.textContent = "$ sending…";
   try {
     const data = Object.fromEntries(new FormData(form).entries());
-    const res = await fetch("https://formsubmit.co/ajax/mail@030.dev", {
+    const res = await fetch("https://formsubmit.co/ajax/c6a2152040d8d52588fa2e7c6969bb18", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(data),
@@ -490,7 +500,7 @@ form.addEventListener("submit", async (e) => {
     form.reset();
     showStatus("✓ message sent — exit code 0. We'll get back to you soon.");
   } catch (err) {
-    showStatus("✗ send failed (exit code 1). Try again or email mail@030.dev directly.", true);
+    showStatus("✗ send failed (exit code 1). Try again or use the email link below.", true);
   } finally {
     submitBtn.disabled = false;
     submitBtn.textContent = "$ send --now";
