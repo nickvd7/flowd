@@ -11,9 +11,11 @@ class Flowd < Formula
   license "MIT"
   head "https://github.com/nickvd7/flowd.git", branch: "main"
 
-  # Stable release block — enable after tagging v1.0.0 (or a chosen v0.3.x):
+  # Stable release block — after tagging, run:
+  #   ./scripts/homebrew-sha256.sh 1.0.0
+  # then uncomment and paste url/sha256/version below (and keep or drop `head`).
   # url "https://github.com/nickvd7/flowd/archive/refs/tags/v1.0.0.tar.gz"
-  # sha256 "REPLACE_WITH_RELEASE_TARBALL_SHA256"
+  # sha256 "REPLACE_WITH_OUTPUT_FROM_scripts/homebrew-sha256.sh"
   # version "1.0.0"
 
   depends_on "rust" => :build

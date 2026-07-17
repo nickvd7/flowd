@@ -37,6 +37,10 @@ cargo install --path crates/flow-daemon --force
 
 # or Homebrew (HEAD until a stable tap formula is published)
 brew install --HEAD --formula Formula/flowd.rb
+
+# After tagging a stable release, compute the bottle/source sha:
+#   ./scripts/homebrew-sha256.sh 1.0.0
+# then uncomment url/sha256/version in Formula/flowd.rb
 ```
 
 Confirm:

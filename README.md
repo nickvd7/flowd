@@ -222,6 +222,7 @@ flowctl automations show <automation_id>
 flowctl dry-run <automation_id>
 flowctl run <automation_id>
 flowctl runs
+flowctl runs show <run_id>
 flowctl undo <run_id>
 ```
 

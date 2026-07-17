@@ -21,13 +21,21 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub struct DryRunOutcome {
+    pub run_id: i64,
     pub preview: Vec<String>,
+    pub report: ExecutionReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionOutcome {
+    pub run_id: Option<i64>,
     pub report: ExecutionReport,
 }
 
 #[derive(Debug, Clone)]
 pub struct UndoOutcome {
     pub source_run_id: i64,
+    pub undo_run_id: i64,
     pub report: ExecutionReport,
 }
 
@@ -117,15 +125,19 @@ pub fn dry_run_automation(
     let spec = load_automation_spec(conn, automation_id)?;
     let preview = dry_run(&spec, allowlist).context("failed to preview automation")?;
     let report = plan(&spec, allowlist).context("failed to plan automation")?;
-    store_run_record(conn, automation_id, "dry_run", &report)?;
-    Ok(DryRunOutcome { preview, report })
+    let run_id = store_run_record(conn, automation_id, "dry_run", &report)?;
+    Ok(DryRunOutcome {
+        run_id,
+        preview,
+        report,
+    })
 }
 
 pub fn execute_automation(
     conn: &Connection,
     automation_id: i64,
     allowlist: &flow_core::PathAllowlist,
-) -> Result<ExecutionReport> {
+) -> Result<ExecutionOutcome> {
     execute_automation_with_force(conn, automation_id, false, allowlist)
 }
 
@@ -134,7 +146,7 @@ pub fn execute_automation_for_path(
     automation_id: i64,
     path: &std::path::Path,
     allowlist: &flow_core::PathAllowlist,
-) -> Result<ExecutionReport> {
+) -> Result<ExecutionOutcome> {
     let stored = load_stored_automation(conn, automation_id)?;
     ensure_automation_status(automation_id, &stored.status)?;
     let spec = flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")?;
@@ -144,14 +156,16 @@ pub fn execute_automation_for_path(
         Err(error) => {
             set_automation_status(conn, automation_id, AUTOMATION_STATUS_FAILED)
                 .context("failed to update automation status")?;
-            store_failed_run_record(conn, automation_id, &error.to_string())?;
+            let _ = store_failed_run_record(conn, automation_id, &error.to_string())?;
             return Err(error).context("failed to execute automation for trigger path");
         }
     };
-    if !report.operations.is_empty() {
-        store_run_record(conn, automation_id, "completed", &report)?;
-    }
-    Ok(report)
+    let run_id = if report.operations.is_empty() {
+        None
+    } else {
+        Some(store_run_record(conn, automation_id, "completed", &report)?)
+    };
+    Ok(ExecutionOutcome { run_id, report })
 }
 
 pub fn execute_automation_with_force(
@@ -159,7 +173,7 @@ pub fn execute_automation_with_force(
     automation_id: i64,
     force: bool,
     allowlist: &flow_core::PathAllowlist,
-) -> Result<ExecutionReport> {
+) -> Result<ExecutionOutcome> {
     let stored = load_stored_automation(conn, automation_id)?;
     ensure_automation_status(automation_id, &stored.status)?;
     let spec = flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")?;
@@ -169,12 +183,89 @@ pub fn execute_automation_with_force(
         Err(error) => {
             set_automation_status(conn, automation_id, AUTOMATION_STATUS_FAILED)
                 .context("failed to update automation status")?;
-            store_failed_run_record(conn, automation_id, &error.to_string())?;
+            let _ = store_failed_run_record(conn, automation_id, &error.to_string())?;
             return Err(error).context("failed to execute automation");
         }
     };
-    store_run_record(conn, automation_id, "completed", &report)?;
-    Ok(report)
+    let run_id = Some(store_run_record(conn, automation_id, "completed", &report)?);
+    Ok(ExecutionOutcome { run_id, report })
+}
+
+pub fn get_run(conn: &Connection, run_id: i64) -> Result<Option<StoredAutomationRun>> {
+    load_automation_run(conn, run_id).context("failed to read automation run")
+}
+
+/// Human-readable audit lines for one stored apply/undo/dry-run record.
+pub fn format_run_audit_summary(run: &StoredAutomationRun) -> Vec<String> {
+    let mut lines = vec![
+        format!("run: {}", run.run_id),
+        format!("automation: {}", run.automation_id),
+        format!("result: {}", run.result),
+        format!("started: {}", run.started_at),
+        format!(
+            "finished: {}",
+            run.finished_at.as_deref().unwrap_or("-")
+        ),
+    ];
+
+    let Some(payload) = run.undo_payload_json.as_deref() else {
+        lines.push("operations: (none recorded)".to_string());
+        return lines;
+    };
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        lines.push("operations: (unreadable payload)".to_string());
+        return lines;
+    };
+
+    if let Some(kind) = value.get("kind").and_then(|item| item.as_str()) {
+        lines.push(format!("kind: {kind}"));
+    }
+    if let Some(source_run_id) = value
+        .get("source_run_id")
+        .and_then(|item| item.as_i64())
+    {
+        lines.push(format!("source_run: {source_run_id}"));
+    }
+    if let Some(error) = value.get("error").and_then(|item| item.as_str()) {
+        lines.push(format!("error: {error}"));
+    }
+
+    let operations = value
+        .get("operations")
+        .cloned()
+        .or_else(|| {
+            value
+                .get("report")
+                .and_then(|report| report.get("operations").cloned())
+        })
+        .and_then(|operations| operations.as_array().cloned())
+        .unwrap_or_default();
+
+    if operations.is_empty() {
+        if value.get("error").is_none() {
+            lines.push("operations: (none)".to_string());
+        }
+        return lines;
+    }
+
+    lines.push(format!("operations ({})", operations.len()));
+    for operation in operations {
+        let action = operation
+            .get("action")
+            .and_then(|item| item.as_str())
+            .unwrap_or("?");
+        let from = operation
+            .get("from")
+            .and_then(|item| item.as_str())
+            .unwrap_or("-");
+        let to = operation
+            .get("to")
+            .and_then(|item| item.as_str())
+            .unwrap_or("-");
+        lines.push(format!("  - {action}: {from} -> {to}"));
+    }
+    lines
 }
 
 fn ensure_dry_run_gate(
@@ -312,7 +403,8 @@ pub fn undo_automation_run(
     let report = match load_completed_execution_report(&run) {
         Ok(report) => report,
         Err(error) => {
-            store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
+            let _ =
+                store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
             return Err(error).context("failed to prepare undo");
         }
     };
@@ -324,7 +416,8 @@ pub fn undo_automation_run(
     let undo_plan = match plan_undo(&report, allowlist) {
         Ok(plan) => plan,
         Err(error) => {
-            store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
+            let _ =
+                store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
             return Err(error).context("failed to derive undo plan");
         }
     };
@@ -332,14 +425,16 @@ pub fn undo_automation_run(
     let executed = match execute_report(&undo_plan, allowlist) {
         Ok(report) => report,
         Err(error) => {
-            store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
+            let _ =
+                store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
             return Err(error).context("failed to execute undo");
         }
     };
 
-    store_undo_run_record(conn, run.automation_id, run.run_id, &executed)?;
+    let undo_run_id = store_undo_run_record(conn, run.automation_id, run.run_id, &executed)?;
     Ok(UndoOutcome {
         source_run_id: run.run_id,
+        undo_run_id,
         report: executed,
     })
 }
@@ -375,7 +470,7 @@ fn store_run_record(
     automation_id: i64,
     result: &str,
     report: &ExecutionReport,
-) -> Result<()> {
+) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     // Undo requires complete execution metadata for every finished run. The
     // stored report is the deterministic audit trail that later allows an
@@ -393,11 +488,10 @@ fn store_run_record(
             undo_payload_json: Some(&payload),
         },
     )
-    .context("failed to insert automation run")?;
-    Ok(())
+    .context("failed to insert automation run")
 }
 
-fn store_failed_run_record(conn: &Connection, automation_id: i64, error: &str) -> Result<()> {
+fn store_failed_run_record(conn: &Connection, automation_id: i64, error: &str) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     let payload = serde_json::json!({ "error": error }).to_string();
     insert_automation_run(
@@ -410,8 +504,7 @@ fn store_failed_run_record(conn: &Connection, automation_id: i64, error: &str) -
             undo_payload_json: Some(&payload),
         },
     )
-    .context("failed to insert automation run")?;
-    Ok(())
+    .context("failed to insert automation run")
 }
 
 fn store_undo_run_record(
@@ -419,7 +512,7 @@ fn store_undo_run_record(
     automation_id: i64,
     source_run_id: i64,
     report: &ExecutionReport,
-) -> Result<()> {
+) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     let payload = serde_json::json!({
         "kind": "undo",
@@ -437,8 +530,7 @@ fn store_undo_run_record(
             undo_payload_json: Some(&payload),
         },
     )
-    .context("failed to insert undo automation run")?;
-    Ok(())
+    .context("failed to insert undo automation run")
 }
 
 fn store_failed_undo_run_record(
@@ -446,7 +538,7 @@ fn store_failed_undo_run_record(
     automation_id: i64,
     source_run_id: i64,
     error: &str,
-) -> Result<()> {
+) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     let payload = serde_json::json!({
         "kind": "undo_failed",
@@ -464,8 +556,7 @@ fn store_failed_undo_run_record(
             undo_payload_json: Some(&payload),
         },
     )
-    .context("failed to insert failed undo automation run")?;
-    Ok(())
+    .context("failed to insert failed undo automation run")
 }
 
 fn load_completed_execution_report(run: &StoredAutomationRun) -> Result<ExecutionReport> {
@@ -1146,14 +1237,16 @@ mod tests {
         assert!(blocked.to_string().contains("dry-run"));
 
         dry_run_automation(&conn, automation_id, &allowlist).unwrap();
-        let report = execute_automation(&conn, automation_id, &allowlist).unwrap();
-        assert!(!report.operations.is_empty());
+        let outcome = execute_automation(&conn, automation_id, &allowlist).unwrap();
+        assert!(!outcome.report.operations.is_empty());
+        assert!(outcome.run_id.is_some());
 
         // Recreate a matching file so --force can still execute after the first run.
         std::fs::write(inbox.join("invoice-1002.pdf"), "invoice").unwrap();
         let forced =
             execute_automation_with_force(&conn, automation_id, true, &allowlist).unwrap();
-        assert!(!forced.operations.is_empty());
+        assert!(!forced.report.operations.is_empty());
+        assert!(forced.run_id.is_some());
     }
 
     #[test]
@@ -1196,5 +1289,42 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn format_run_audit_summary_includes_operations_and_undo_metadata() {
+        let completed = StoredAutomationRun {
+            run_id: 7,
+            automation_id: 3,
+            started_at: "2026-03-14T12:00:00Z".to_string(),
+            finished_at: Some("2026-03-14T12:00:01Z".to_string()),
+            result: "completed".to_string(),
+            undo_payload_json: Some(
+                r#"{"operations":[{"action":"rename","from":"/a/x.pdf","to":"/a/y.pdf"}]}"#
+                    .to_string(),
+            ),
+        };
+        let completed_lines = format_run_audit_summary(&completed);
+        assert!(completed_lines.iter().any(|line| line.contains("run: 7")));
+        assert!(completed_lines
+            .iter()
+            .any(|line| line.contains("rename: /a/x.pdf -> /a/y.pdf")));
+
+        let undo = StoredAutomationRun {
+            run_id: 8,
+            automation_id: 3,
+            started_at: "2026-03-14T12:01:00Z".to_string(),
+            finished_at: Some("2026-03-14T12:01:01Z".to_string()),
+            result: "undone".to_string(),
+            undo_payload_json: Some(
+                r#"{"kind":"undo","source_run_id":7,"report":{"operations":[{"action":"rename","from":"/a/y.pdf","to":"/a/x.pdf"}]}}"#
+                    .to_string(),
+            ),
+        };
+        let undo_lines = format_run_audit_summary(&undo);
+        assert!(undo_lines.iter().any(|line| line.contains("kind: undo")));
+        assert!(undo_lines
+            .iter()
+            .any(|line| line.contains("source_run: 7")));
     }
 }

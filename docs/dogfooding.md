@@ -10,6 +10,7 @@ Before or alongside human dogfooding, run the deterministic replay harness:
 cargo test -p flow-analysis --test simulated_dogfood
 cargo test -p flow-analysis --test demo_scenarios
 cargo test -p flow-core paths
+cargo test -p flow-cli --test daemon_lifecycle
 ```
 
 That suite checks:

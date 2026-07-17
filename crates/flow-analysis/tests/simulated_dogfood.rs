@@ -150,11 +150,12 @@ fn simulated_dogfood_invoice_lifecycle_with_allowlist() {
         "dry-run should describe predicted work"
     );
 
-    let report = execute_automation(&conn, automation_id, &allowlist).unwrap();
+    let outcome = execute_automation(&conn, automation_id, &allowlist).unwrap();
     assert!(
-        !report.operations.is_empty(),
+        !outcome.report.operations.is_empty(),
         "run should apply at least one filesystem operation"
     );
+    assert!(outcome.run_id.is_some(), "completed run should be auditable");
     assert!(
         !downloads.join("invoice-2001.pdf").exists(),
         "source invoice should be consumed"

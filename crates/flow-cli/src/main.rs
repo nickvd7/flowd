@@ -40,8 +40,9 @@ use flow_db::{
 use flow_dsl::{Action, AutomationSpec, WorkflowPackManifest};
 use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
-    execute_automation_with_force, list_runs, preview_automation, preview_suggestion,
-    teach_from_session, undo_automation_run, AutomationPreview,
+    execute_automation_with_force, format_run_audit_summary, get_run, list_runs,
+    preview_automation, preview_suggestion, teach_from_session, undo_automation_run,
+    AutomationPreview,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -244,10 +245,19 @@ enum Commands {
     },
     #[command(about = "Preview an automation without changing files")]
     DryRun { automation_id: i64 },
-    #[command(about = "List automation run history")]
-    Runs,
+    #[command(about = "List automation run history or show one audit record")]
+    Runs {
+        #[command(subcommand)]
+        command: Option<RunsCommand>,
+    },
     #[command(about = "Undo one completed automation run")]
     Undo { run_id: i64 },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunsCommand {
+    #[command(about = "Show the audit summary for one automation run")]
+    Show { run_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -502,7 +512,10 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::DryRun { automation_id }) => {
             dry_run_automation_command(&context, automation_id)?
         }
-        Some(Commands::Runs) => render_runs(&context)?,
+        Some(Commands::Runs { command }) => match command {
+            Some(RunsCommand::Show { run_id }) => show_run_command(&context, run_id)?,
+            None => render_runs(&context)?,
+        },
         Some(Commands::Undo { run_id }) => undo_run_command(&context, run_id)?,
         None => unreachable!("clap handles missing commands"),
     }
@@ -2245,6 +2258,8 @@ fn dry_run_automation_command(context: &RuntimeContext, automation_id: i64) -> a
     for line in &outcome.preview {
         println!("{line}");
     }
+    println!("Dry-run recorded as run {}.", outcome.run_id);
+    println!("Inspect with: flowctl runs show {}", outcome.run_id);
 
     Ok(())
 }
@@ -2255,19 +2270,24 @@ fn run_automation_command(
     force: bool,
 ) -> anyhow::Result<()> {
     let conn = open_cli_database(context)?;
-    let report =
+    let outcome =
         execute_automation_with_force(&conn, automation_id, force, &execution_allowlist(context))
             .context("failed to execute automation")?;
 
-    if report.operations.is_empty() {
+    if outcome.report.operations.is_empty() {
         println!("No matching files.");
     } else {
-        for operation in &report.operations {
+        for operation in &outcome.report.operations {
             println!(
                 "{}: {} -> {}",
                 operation.action, operation.from, operation.to
             );
         }
+    }
+    if let Some(run_id) = outcome.run_id {
+        println!("Run recorded as id={run_id}.");
+        println!("Inspect with: flowctl runs show {run_id}");
+        println!("Undo with: flowctl undo {run_id}");
     }
 
     Ok(())
@@ -2302,6 +2322,23 @@ fn render_runs(context: &RuntimeContext) -> anyhow::Result<()> {
         &["id", "automation", "result", "ops", "started", "finished"],
         &rows,
     );
+    println!();
+    println!("Inspect one record with: flowctl runs show <id>");
+    Ok(())
+}
+
+fn show_run_command(context: &RuntimeContext, run_id: i64) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let run = get_run(&conn, run_id)
+        .context("failed to read automation run")?
+        .ok_or_else(|| anyhow::anyhow!("automation run {run_id} not found"))?;
+    for line in format_run_audit_summary(&run) {
+        println!("{line}");
+    }
+    if run.result == "completed" {
+        println!();
+        println!("Undo with: flowctl undo {run_id}");
+    }
     Ok(())
 }
 
@@ -2321,6 +2358,8 @@ fn undo_run_command(context: &RuntimeContext, run_id: i64) -> anyhow::Result<()>
         );
     }
     println!("Undid automation run {}.", outcome.source_run_id);
+    println!("Undo recorded as run {}.", outcome.undo_run_id);
+    println!("Inspect with: flowctl runs show {}", outcome.undo_run_id);
     Ok(())
 }
 

@@ -305,7 +305,7 @@ fn maybe_auto_run_approved_automations(
             for path in trigger_paths {
                 match execute_automation_for_path(conn, automation.automation_id, path, &allowlist)
                 {
-                    Ok(report) => operations.extend(report.operations),
+                    Ok(outcome) => operations.extend(outcome.report.operations),
                     Err(error) => {
                         let message = error.to_string();
                         if message.contains("dry-run") {
@@ -323,17 +323,26 @@ fn maybe_auto_run_approved_automations(
             if let Some(error) = first_error {
                 Err(error)
             } else {
-                Ok(flow_exec::ExecutionReport { operations })
+                Ok(flow_exec::ExecutionOutcome {
+                    run_id: None,
+                    report: flow_exec::ExecutionReport { operations },
+                })
             }
         } else {
             execute_automation(conn, automation.automation_id, &allowlist)
         };
 
         match result {
-            Ok(report) if report.operations.is_empty() => {}
-            Ok(report) => {
+            Ok(outcome) if outcome.report.operations.is_empty() => {}
+            Ok(outcome) => {
                 ran_any = true;
-                for operation in report.operations {
+                if let Some(run_id) = outcome.run_id {
+                    println!(
+                        "auto-run recorded as run {run_id} for automation {}",
+                        automation.automation_id
+                    );
+                }
+                for operation in outcome.report.operations {
                     println!(
                         "auto-run {}: {} -> {}",
                         automation.automation_id, operation.from, operation.to

@@ -1,0 +1,38 @@
+[
+  {
+    "ts": "2026-03-14T09:00:00Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "create",
+      "path": "/demo/Desktop/report-1001.pdf",
+      "from_path": null
+    }
+  },
+  {
+    "ts": "2026-03-14T09:00:25Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Documents/Archive/report-1001.pdf",
+      "from_path": "/demo/Desktop/report-1001.pdf"
+    }
+  },
+  {
+    "ts": "2026-03-14T10:00:00Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "create",
+      "path": "/demo/Desktop/report-1002.pdf",
+      "from_path": null
+    }
+  },
+  {
+    "ts": "2026-03-14T10:00:25Z",
+    "source": "FileWatcher",
+    "payload": {
+      "kind": "move",
+      "path": "/demo/Documents/Archive/report-1002.pdf",
+      "from_path": "/demo/Desktop/report-1002.pdf"
+    }
+  }
+]

@@ -23,14 +23,25 @@ pub fn pid_file_path() -> PathBuf {
     runtime_dir().join(PID_FILE_NAME)
 }
 
+pub fn log_file_path() -> PathBuf {
+    runtime_dir().join("flow-daemon.log")
+}
+
 pub fn daemon_status() -> Result<String> {
+    let log = log_file_path();
     match read_pid()? {
-        Some(pid) if process_is_running(pid) => Ok(format!("running (pid {pid})")),
+        Some(pid) if process_is_running(pid) => Ok(format!(
+            "running (pid {pid})\nLogs: {}",
+            log.display()
+        )),
         Some(pid) => {
             let _ = fs::remove_file(pid_file_path());
-            Ok(format!("not running (stale pid file for {pid} removed)"))
+            Ok(format!(
+                "not running (stale pid file for {pid} removed)\nLogs: {}",
+                log.display()
+            ))
         }
-        None => Ok("not running".to_string()),
+        None => Ok(format!("not running\nLogs: {}", log.display())),
     }
 }
 
@@ -50,7 +61,7 @@ pub fn start_daemon(loaded: &LoadedConfig) -> Result<()> {
 
     fs::create_dir_all(runtime_dir())
         .with_context(|| format!("failed to create {}", runtime_dir().display()))?;
-    let log_path = runtime_dir().join("flow-daemon.log");
+    let log_path = log_file_path();
     let log_file = fs::OpenOptions::new()
         .create(true)
         .append(true)

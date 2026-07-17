@@ -914,6 +914,9 @@ fn runs_lists_completed_execution_history() {
         .output()
         .unwrap();
     assert!(run.status.success());
+    let run_stdout = String::from_utf8(run.stdout).unwrap();
+    assert!(run_stdout.contains("Run recorded as id="));
+    assert!(run_stdout.contains("flowctl runs show"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("runs")
@@ -928,6 +931,20 @@ fn runs_lists_completed_execution_history() {
     assert!(stdout.contains("ops"));
     assert!(stdout.contains("completed"));
     assert!(stdout.contains("2"));
+    assert!(stdout.contains("flowctl runs show"));
+
+    let show = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["runs", "show", "2"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
+        .env("FLOWD_DB_PATH", &db_path)
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let show_stdout = String::from_utf8(show.stdout).unwrap();
+    assert!(show_stdout.contains("run: 2"));
+    assert!(show_stdout.contains("result: completed"));
+    assert!(show_stdout.contains("operations"));
+    assert!(show_stdout.contains("Undo with: flowctl undo 2"));
 }
 
 #[test]

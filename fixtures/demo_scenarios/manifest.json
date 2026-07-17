@@ -35,6 +35,15 @@
       "expected_normalized_events": 4,
       "expected_pattern_signature": "RenameFile:project_brief_reviewed->MoveFile:project_brief_reviewed",
       "expected_proposal_contains": "Repeated project_brief_reviewed file workflow detected"
+    },
+    {
+      "id": "desktop_pdf_archive",
+      "title": "desktop PDF archive",
+      "file": "desktop_pdf_archive.raw_events.json",
+      "expected_sources": ["FileWatcher"],
+      "expected_normalized_events": 4,
+      "expected_pattern_signature": "CreateFile:report->MoveFile:report",
+      "expected_proposal_contains": "Repeated report file workflow detected"
     }
   ]
 }

@@ -17,5 +17,6 @@ Included scenarios:
 - `screenshot_cleanup`: desktop screenshot creation followed by archival move
 - `downloads_sorting`: browser download plus file move into a finance statements folder
 - `terminal_file_organization`: terminal-observed rename and move workflow
+- `desktop_pdf_archive`: desktop PDF creation followed by archive move
 
 These files are intended to stay readable enough to reference directly in docs and future demo tooling.

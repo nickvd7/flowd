@@ -50,15 +50,15 @@ Copied and expanded from `docs/PLAN.md`:
 - [x] `flowctl daemon start|stop|status`
 - [x] `flowctl daemon install-service` (systemd user / launchd)
 - [x] contrib unit templates under `contrib/`
-- [ ] crash-recovery soak tests
-- [ ] log rotation guidance validated on both platforms
+- [x] crash-recovery soak tests (`crates/flow-cli/tests/daemon_lifecycle.rs`)
+- [x] log rotation guidance on Linux and macOS (`docs/daemon.md`)
 
 ### 4. Safety
 
 - [x] execution path allowlist (`observed_folders` / `execution_allowed_roots`)
 - [x] enforce allowlist on dry-run, run, undo, and daemon auto-run
 - [x] stronger canonicalize edge-case matrix for symlinks
-- [ ] audit-friendly run summaries for every apply/undo
+- [x] audit-friendly run summaries for every apply/undo (`flowctl runs show`)
 
 ### 5. Packaging and docs
 
@@ -66,6 +66,7 @@ Copied and expanded from `docs/PLAN.md`:
 - [x] `docs/release-notes-v0.3.md`
 - [x] upgrade guide from 0.2/0.3 to 1.0 (`docs/upgrade-to-v1.md`)
 - [x] supported platforms matrix in README
+- [x] candidate `docs/release-notes-v1.0.md` + Homebrew sha helper script
 
 ## Suggested release train
 
