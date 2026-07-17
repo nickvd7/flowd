@@ -131,9 +131,7 @@ fn suggestions_explain_renders_explanation_column() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("explain"));
     assert!(stdout.contains("baseline fallback"));
-    assert!(stdout.contains(
-        "Open-core baseline order and wording were used because intelligence was unavailable."
-    ));
+    assert!(stdout.contains("Open-core baseline used; repetitions="));
 }
 
 #[test]

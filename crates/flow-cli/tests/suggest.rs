@@ -59,7 +59,7 @@ fn suggest_explain_renders_baseline_fallback_details() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("explain: baseline fallback"));
     assert!(stdout.contains("score: baseline_score="));
-    assert!(stdout.contains("factors: fallback=No intelligence decision was applied."));
+    assert!(stdout.contains("factors: fallback=No private intelligence decision was applied."));
     assert!(stdout.contains("Next steps:"));
     assert!(stdout.contains("flowctl suggestions history"));
     assert!(stdout.contains("flowctl approve 1"));

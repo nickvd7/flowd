@@ -1,4 +1,6 @@
 pub mod intelligence_boundary;
+#[cfg(feature = "intelligence")]
+pub mod private_intelligence_client;
 
 use anyhow::{Context, Result};
 use flow_db::repo::{
@@ -14,6 +16,8 @@ use intelligence_boundary::{
     map_patterns_to_envelope_with_history_and_sessions, IntelligenceBoundary, IntelligenceClient,
     NoopIntelligenceClient, SuggestionDecisionAction,
 };
+#[cfg(feature = "intelligence")]
+pub use private_intelligence_client::PrivateIntelligenceClient;
 use rusqlite::Connection;
 
 /// The open-core analysis layer owns normalization, session building, pattern
@@ -135,6 +139,16 @@ pub fn normalize_pending_raw_events(conn: &mut Connection) -> Result<()> {
 pub fn catch_up_analysis(conn: &mut Connection, inactivity_secs: i64) -> Result<()> {
     normalize_pending_raw_events(conn)?;
     refresh_analysis_state(conn, inactivity_secs)?;
+    Ok(())
+}
+
+pub fn catch_up_analysis_with_intelligence(
+    conn: &mut Connection,
+    inactivity_secs: i64,
+    intelligence_client: &dyn IntelligenceClient,
+) -> Result<()> {
+    normalize_pending_raw_events(conn)?;
+    refresh_analysis_state_with_intelligence(conn, inactivity_secs, intelligence_client)?;
     Ok(())
 }
 

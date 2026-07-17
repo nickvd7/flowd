@@ -247,6 +247,7 @@ dependencies = [
  "flow-core",
  "flow-db",
  "flow-patterns",
+ "flowd-intelligence",
  "rusqlite",
  "serde",
  "serde_json",
@@ -350,6 +351,14 @@ dependencies = [
  "chrono",
  "flow-adapters",
  "flow-core",
+ "serde_json",
+]
+
+[[package]]
+name = "flowd-intelligence"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "serde_json",
 ]
 

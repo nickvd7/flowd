@@ -16,7 +16,7 @@ fn doctor_reports_healthy_local_state() {
     write_config(
         &config_path,
         &format!(
-            "database_path = \"{}\"\nobserved_folders = [\"{}\"]\nintelligence_enabled = true\n",
+            "database_path = \"{}\"\nobserved_folders = [\"{}\"]\nintelligence_enabled = false\n",
             db_path.display(),
             watch_path.display(),
         ),
@@ -41,7 +41,7 @@ fn doctor_reports_healthy_local_state() {
             "patterns detected: yes\n",
             "suggestions available: yes\n",
             "automations: 1 active\n",
-            "intelligence layer: connected\n",
+            "intelligence layer: disabled\n",
         )
     );
 }

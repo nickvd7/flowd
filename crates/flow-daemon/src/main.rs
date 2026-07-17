@@ -8,6 +8,8 @@ use flow_adapters::clipboard::{ClipboardObserver, ClipboardReadError, CommandCli
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
 use flow_adapters::terminal::{TerminalBridgeError, TerminalHistoryObserver};
 use flow_analysis::catch_up_analysis;
+#[cfg(feature = "intelligence")]
+use flow_analysis::{catch_up_analysis_with_intelligence, PrivateIntelligenceClient};
 use flow_core::config::{expand_home, Config};
 use flow_db::open_database as open_sqlite_database;
 use flow_db::repo::list_automations;
@@ -38,7 +40,7 @@ fn run() -> Result<()> {
     let observed_paths = resolve_observed_paths(&config)?;
     let mut conn = open_database(&config).context("failed to initialize daemon database")?;
 
-    catch_up_analysis(&mut conn, config.session_inactivity_secs)
+    refresh_daemon_analysis(&mut conn, &config)
         .context("failed to catch up analysis state")?;
 
     let (mut watcher, rx) = notify_channel().context("failed to create filesystem watcher")?;
@@ -100,7 +102,7 @@ fn run() -> Result<()> {
                         };
 
                         accepted_file_event = true;
-                        catch_up_analysis(&mut conn, config.session_inactivity_secs)
+                        refresh_daemon_analysis(&mut conn, &config)
                             .context("failed during analysis refresh")?;
                         println!("{}", serde_json::to_string(&raw_event)?);
                     }
@@ -120,7 +122,7 @@ fn run() -> Result<()> {
                     observation
                         .accept_raw_event(&conn, raw_event.clone())
                         .context("failed during clipboard observation")?;
-                    catch_up_analysis(&mut conn, config.session_inactivity_secs)
+                    refresh_daemon_analysis(&mut conn, &config)
                         .context("failed during analysis refresh")?;
                     println!("{}", serde_json::to_string(&raw_event)?);
                 }
@@ -136,7 +138,7 @@ fn run() -> Result<()> {
                         observation
                             .accept_raw_event(&conn, raw_event.clone())
                             .context("failed during browser download observation")?;
-                        catch_up_analysis(&mut conn, config.session_inactivity_secs)
+                        refresh_daemon_analysis(&mut conn, &config)
                             .context("failed during analysis refresh")?;
                         println!("{}", serde_json::to_string(&raw_event)?);
                     }
@@ -152,7 +154,7 @@ fn run() -> Result<()> {
                         observation
                             .accept_raw_event(&conn, raw_event.clone())
                             .context("failed during terminal observation")?;
-                        catch_up_analysis(&mut conn, config.session_inactivity_secs)
+                        refresh_daemon_analysis(&mut conn, &config)
                             .context("failed during analysis refresh")?;
                         println!("{}", serde_json::to_string(&raw_event)?);
                     }
@@ -163,6 +165,19 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn refresh_daemon_analysis(conn: &mut Connection, config: &Config) -> Result<()> {
+    #[cfg(feature = "intelligence")]
+    if config.intelligence_enabled {
+        return catch_up_analysis_with_intelligence(
+            conn,
+            config.session_inactivity_secs,
+            &PrivateIntelligenceClient::default(),
+        );
+    }
+
+    catch_up_analysis(conn, config.session_inactivity_secs)
 }
 
 fn build_clipboard_observer(config: &Config) -> Option<ClipboardObserver<CommandClipboardReader>> {

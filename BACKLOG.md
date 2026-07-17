@@ -2,30 +2,16 @@
 
 ## Now
 
-### feat/intelligence-client-wiring
-PR: feat: wire optional private intelligence client
+### feat/terminal-command-patterns
+PR: feat: improve terminal command workflow understanding
 
 Goal:
-Connect `flowd-intelligence` behind a feature flag / client implementation so
-`intelligence_enabled = true` does more than the local noop boundary.
+Improve parsing and normalization of repeated shell workflows beyond the NDJSON bridge.
 
 Acceptance:
 - cargo build passes
 - cargo test passes
-- open-core remains fully functional with intelligence disabled
-
----
-
-### feat/suggestions-explain-improvements
-PR: feat: improve suggestion explainability output
-
-Goal:
-Make explanations clearer with:
-- repetitions
-- recency
-- confidence
-- estimated usefulness
-- representative traces
+- richer terminal sequence signatures for repeated file-oriented shell workflows
 
 ## Next
 
@@ -36,12 +22,6 @@ Goal:
 Support installing packs from a remote registry / hub.
 
 ---
-
-### feat/terminal-command-patterns
-PR: feat: improve terminal command workflow understanding
-
-Goal:
-Improve parsing and normalization of repeated shell workflows beyond the NDJSON bridge.
 
 ### docs/example-workflows
 PR: docs: expand example workflows for flowd
@@ -58,6 +38,8 @@ Only consider if there is a very strong privacy-safe local design.
 Enterprise-oriented, not needed for near-term MVP.
 
 ## Done recently
+- optional `--features intelligence` client wiring to `flowd-intelligence`
+- richer `flowctl suggestions explain` output
 - workflow pack install (`flowctl packs install`)
 - `flowctl doctor` / `flowctl status`
 - `flowctl insights`

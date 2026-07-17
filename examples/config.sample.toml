@@ -17,7 +17,10 @@ clipboard_poll_interval_ms = 1000
 redact_command_args = true
 strip_browser_query_strings = true
 suggestion_min_usefulness_score = 0.0
-# Private ranking stays off until a real intelligence client is wired.
+# Private ranking stays off by default. To use flowd-intelligence locally:
+#   cargo install --path crates/flow-cli --features intelligence
+#   cargo install --path crates/flow-daemon --features intelligence
+# then set intelligence_enabled = true
 intelligence_enabled = false
 session_inactivity_secs = 300
 file_event_dedup_window_ms = 500

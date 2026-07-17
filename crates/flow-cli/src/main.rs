@@ -8,6 +8,8 @@ use flow_analysis::intelligence_boundary::{
     NoopIntelligenceClient, SuggestionDecisionAction, SuggestionDisplayResult,
     SuggestionExplainability,
 };
+#[cfg(feature = "intelligence")]
+use flow_analysis::PrivateIntelligenceClient;
 use flow_core::config::{
     expand_home, preferred_setup_config_path, Config, ConfigSource, LoadedConfig,
 };
@@ -779,9 +781,19 @@ fn render_config_command(
     Ok(())
 }
 
+fn resolve_intelligence_client(config: &Config) -> Box<dyn IntelligenceClient> {
+    #[cfg(feature = "intelligence")]
+    if config.intelligence_enabled {
+        return Box::new(PrivateIntelligenceClient::default());
+    }
+    let _ = config;
+    Box::new(NoopIntelligenceClient)
+}
+
 fn render_suggestions(context: &RuntimeContext, explain: bool) -> anyhow::Result<()> {
     let mut conn = open_cli_database(context)?;
-    let suggestions = suggestion_display_results(&conn, context, &NoopIntelligenceClient)?;
+    let client = resolve_intelligence_client(&context.loaded_config.config);
+    let suggestions = suggestion_display_results(&conn, context, client.as_ref())?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -1005,9 +1017,16 @@ fn doctor_report(context: &RuntimeContext) -> DoctorReport {
     };
 
     let intelligence_layer = if config.intelligence_enabled {
-        match NoopIntelligenceClient.evaluate(&default_intelligence_request()) {
-            Ok(_) => "connected".to_string(),
-            Err(error) => format!("unavailable ({error})"),
+        #[cfg(feature = "intelligence")]
+        {
+            match PrivateIntelligenceClient::default().evaluate(&default_intelligence_request()) {
+                Ok(_) => "connected".to_string(),
+                Err(error) => format!("unavailable ({error})"),
+            }
+        }
+        #[cfg(not(feature = "intelligence"))]
+        {
+            "enabled in config, but binary built without --features intelligence".to_string()
         }
     } else {
         "disabled".to_string()
@@ -1155,7 +1174,8 @@ fn is_doctor_daemon_running() -> bool {
 
 fn render_suggestions_table(context: &RuntimeContext, explain: bool) -> anyhow::Result<()> {
     let mut conn = open_cli_database(context)?;
-    let suggestions = suggestion_display_results(&conn, context, &NoopIntelligenceClient)?;
+    let client = resolve_intelligence_client(&context.loaded_config.config);
+    let suggestions = suggestion_display_results(&conn, context, client.as_ref())?;
 
     if suggestions.is_empty() {
         println!("No suggestions stored.");
@@ -1185,8 +1205,9 @@ fn render_suggestions_table(context: &RuntimeContext, explain: bool) -> anyhow::
 
 fn explain_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> anyhow::Result<()> {
     let conn = open_cli_database(context)?;
+    let client = resolve_intelligence_client(&context.loaded_config.config);
     let resolved =
-        resolve_suggestion_explanation(&conn, context, &NoopIntelligenceClient, suggestion_id)?;
+        resolve_suggestion_explanation(&conn, context, client.as_ref(), suggestion_id)?;
     let preview =
         preview_suggestion(&conn, suggestion_id).context("failed to preview suggestion impact")?;
 
@@ -2010,7 +2031,7 @@ fn suggestion_display_results(
         return Ok(suggestions
             .into_iter()
             .map(|suggestion| SuggestionDisplayResult {
-                explainability: baseline_fallback_explainability(suggestion.usefulness_score),
+                explainability: baseline_fallback_explainability(&suggestion),
                 suggestion,
                 action: SuggestionDecisionAction::Keep,
             })
@@ -2049,7 +2070,7 @@ fn resolve_suggestion_explanation(
         let explainability = if should_bypass_intelligence_ranking(&context.loaded_config.config) {
             ResolvedSuggestionExplanation {
                 action: SuggestionDecisionAction::Keep,
-                explainability: baseline_fallback_explainability(suggestion.usefulness_score),
+                explainability: baseline_fallback_explainability(&suggestion),
                 suggestion,
                 example_events,
             }
@@ -2087,31 +2108,52 @@ fn render_suggestion_explanation_report(
     preview: &AutomationPreview,
 ) -> Vec<String> {
     let suggestion = &resolved.suggestion;
+    let confidence = explainability_confidence(&resolved.explainability)
+        .unwrap_or(suggestion.usefulness_score);
     let mut lines = vec![
         format!("Suggestion: {}", suggestion.proposal_text),
         String::new(),
         "Why this suggestion appeared:".to_string(),
         String::new(),
         format!("pattern repetitions: {}", suggestion.count),
-        format!("last seen: {}", format_timestamp(&suggestion.last_seen_at)),
+        format!(
+            "last seen: {}{}",
+            format_timestamp(&suggestion.last_seen_at),
+            render_recency_suffix(&suggestion.last_seen_at)
+        ),
         format!(
             "confidence: {} ({:.3})",
-            render_confidence_label(suggestion.usefulness_score),
-            suggestion.usefulness_score
+            render_confidence_label(confidence),
+            confidence
         ),
+        format!("usefulness: {:.3}", suggestion.usefulness_score),
         format!(
             "estimated time saved: ~{}",
             render_estimated_time_saved(suggestion.avg_duration_ms)
         ),
     ];
 
+    lines.push(String::new());
+    lines.extend(render_explainability_lines(&resolved.explainability));
+
     let workflow_lines = render_observed_workflow(&resolved.example_events);
     lines.push(String::new());
     lines.push("Observed workflow:".to_string());
     if workflow_lines.is_empty() {
-        lines.push("- no stored workflow steps available".to_string());
+        let fallback = render_canonical_workflow_trace(&suggestion.canonical_summary);
+        if fallback.is_empty() {
+            lines.push("- no stored workflow steps available".to_string());
+        } else {
+            lines.push("- reconstructed from pattern summary:".to_string());
+            lines.extend(fallback.into_iter().map(|line| format!("- {line}")));
+        }
     } else {
-        lines.extend(workflow_lines.into_iter().map(|line| format!("- {line}")));
+        lines.extend(
+            workflow_lines
+                .into_iter()
+                .take(8)
+                .map(|line| format!("- {line}")),
+        );
     }
 
     lines.push(String::new());
@@ -2134,17 +2176,43 @@ fn render_suggestion_explanation_report(
         ));
     }
 
-    if resolved.explainability.source != ExplainabilitySource::BaselineFallback {
-        lines.push(format!(
-            "display source: {}",
-            render_explainability_source(resolved.explainability.source)
-        ));
-    }
+    lines.push(format!(
+        "display source: {}",
+        render_explainability_source(resolved.explainability.source)
+    ));
 
     lines.push(String::new());
     lines.extend(render_automation_preview(preview));
 
     lines
+}
+
+fn explainability_confidence(explainability: &SuggestionExplainability) -> Option<f64> {
+    explainability
+        .score_breakdown
+        .iter()
+        .find(|component| component.label == "final_confidence")
+        .map(|component| component.value)
+}
+
+fn render_recency_suffix(last_seen_at: &str) -> String {
+    let Ok(parsed) = DateTime::parse_from_rfc3339(last_seen_at) else {
+        return String::new();
+    };
+    let seconds = Utc::now()
+        .signed_duration_since(parsed.with_timezone(&Utc))
+        .num_seconds()
+        .max(0);
+    format!(" (recency: {seconds}s ago)")
+}
+
+fn render_canonical_workflow_trace(summary: &str) -> Vec<String> {
+    summary
+        .split("->")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect()
 }
 
 fn mark_suggestions_displayed_from_results(
@@ -2405,18 +2473,27 @@ fn render_suggestion_history_report(suggestion: &StoredSuggestionRecord) -> Vec<
     lines
 }
 
-fn baseline_fallback_explainability(score: f64) -> SuggestionExplainability {
+fn baseline_fallback_explainability(suggestion: &StoredSuggestion) -> SuggestionExplainability {
     SuggestionExplainability {
         source: ExplainabilitySource::BaselineFallback,
         action: SuggestionDecisionAction::Keep,
         rank_hint: None,
-        summary:
-            "Open-core baseline order and wording were used because intelligence was unavailable."
-                .to_string(),
+        summary: format!(
+            "Open-core baseline used; repetitions={}, usefulness={:.3}.",
+            suggestion.count, suggestion.usefulness_score
+        ),
         score_breakdown: vec![
             flow_analysis::intelligence_boundary::IntelligenceScoreComponent {
                 label: "baseline_score".to_string(),
-                value: score,
+                value: suggestion.usefulness_score,
+            },
+            flow_analysis::intelligence_boundary::IntelligenceScoreComponent {
+                label: "repetitions".to_string(),
+                value: suggestion.count as f64,
+            },
+            flow_analysis::intelligence_boundary::IntelligenceScoreComponent {
+                label: "avg_duration_ms".to_string(),
+                value: suggestion.avg_duration_ms as f64,
             },
         ],
         timing_reason: None,
@@ -2424,7 +2501,11 @@ fn baseline_fallback_explainability(score: f64) -> SuggestionExplainability {
         ranking_factors: vec![
             flow_analysis::intelligence_boundary::IntelligenceRankingFactor {
                 label: "fallback".to_string(),
-                detail: "No intelligence decision was applied.".to_string(),
+                detail: "No private intelligence decision was applied.".to_string(),
+            },
+            flow_analysis::intelligence_boundary::IntelligenceRankingFactor {
+                label: "last_seen".to_string(),
+                detail: suggestion.last_seen_at.clone(),
             },
         ],
     }
@@ -2966,15 +3047,17 @@ mod tests {
 
     #[test]
     fn baseline_fallback_explainability_is_explicit_and_deterministic() {
-        let first = baseline_fallback_explainability(0.9);
-        let second = baseline_fallback_explainability(0.9);
+        let suggestion = stored_suggestion(1, "CreateFile:invoice-a", 0.9);
+        let first = baseline_fallback_explainability(&suggestion);
+        let second = baseline_fallback_explainability(&suggestion);
 
         assert_eq!(first, second);
         assert_eq!(first.source, ExplainabilitySource::BaselineFallback);
-        assert_eq!(
-            first.summary,
-            "Open-core baseline order and wording were used because intelligence was unavailable."
-        );
+        assert!(first.summary.contains("repetitions=2"));
+        assert!(first
+            .score_breakdown
+            .iter()
+            .any(|component| component.label == "repetitions"));
     }
 
     #[test]
@@ -3049,7 +3132,9 @@ mod tests {
 
         assert!(lines.contains(&"decision: suppressed".to_string()));
         assert!(lines.contains(&"display source: intelligence".to_string()));
-        assert!(lines.contains(&"- no stored workflow steps available".to_string()));
+        assert!(lines.contains(&"- reconstructed from pattern summary:".to_string()));
+        assert!(lines.contains(&"- CreateFile".to_string()));
+        assert!(lines.contains(&"- RenameFile".to_string()));
     }
 
     #[test]

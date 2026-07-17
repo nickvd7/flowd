@@ -228,10 +228,16 @@ filesystem events
 
 `flowd` is the open-core workflow engine. It owns event capture, persistence, sessions, pattern detection, baseline suggestions, automations, execution, undo, and explainability plumbing.
 
-An optional private decision layer, `flowd-intelligence`, can improve suggestion quality through ranking, timing, suppression, personalization, clustering, wording, and display decisions. The open-core boundary exists today; a live client is not wired by default (`intelligence_enabled = false`). The integration direction is one-way:
+An optional private decision layer, `flowd-intelligence`, can improve suggestion quality through ranking, timing, suppression, personalization, clustering, wording, and display decisions. Build with `--features intelligence` and set `intelligence_enabled = true` to enable the live client. Default builds keep the noop boundary so public CI never depends on the private crate. The integration direction is one-way:
 
 ```text
 flowd -> flowd-intelligence
+```
+
+```bash
+# optional private ranking (requires sibling checkout of flowd-intelligence)
+cargo install --path crates/flow-cli --features intelligence
+cargo install --path crates/flow-daemon --features intelligence
 ```
 
 flowd remains fully functional without the intelligence layer. See [Privacy](docs/privacy.md).
