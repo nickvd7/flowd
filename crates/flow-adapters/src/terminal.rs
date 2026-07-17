@@ -294,58 +294,123 @@ fn aggregate_segment_signals(segments: Vec<CommandSegmentSignal>) -> TerminalSig
 }
 
 fn classify_move_command(cwd: &str, path_args: &[String]) -> CommandSegmentSignal {
-    if path_args.len() != 2 {
-        return CommandSegmentSignal {
-            kind: TerminalCommandKind::Command,
-            path: None,
-            from_path: None,
-            paths: Vec::new(),
-            source_paths: Vec::new(),
-            target_paths: Vec::new(),
-        };
-    }
+    let Some((sources, destination)) = split_transfer_paths(path_args) else {
+        return empty_command_signal();
+    };
 
-    let from_path = resolve_path(cwd, &path_args[0]);
-    let to_path = resolve_path(cwd, &path_args[1]);
-    let kind = if same_parent(&from_path, &to_path) {
+    let source_paths: Vec<String> = sources
+        .iter()
+        .map(|source| resolve_path(cwd, source))
+        .collect();
+    let destination_is_dir = looks_like_directory_destination(destination) || sources.len() > 1;
+    let target_paths: Vec<String> = if destination_is_dir {
+        let destination_dir = resolve_path(cwd, destination.trim_end_matches('/'));
+        source_paths
+            .iter()
+            .map(|source| join_destination_dir(&destination_dir, source))
+            .collect()
+    } else {
+        vec![resolve_path(cwd, destination)]
+    };
+
+    let Some(from_path) = source_paths.first().cloned() else {
+        return empty_command_signal();
+    };
+    let Some(to_path) = target_paths.first().cloned() else {
+        return empty_command_signal();
+    };
+
+    let kind = if !destination_is_dir && same_parent(&from_path, &to_path) {
         TerminalCommandKind::Rename
     } else {
         TerminalCommandKind::Move
     };
 
+    let mut paths = source_paths.clone();
+    paths.extend(target_paths.iter().cloned());
+
     CommandSegmentSignal {
         kind,
-        path: Some(to_path.clone()),
-        from_path: Some(from_path.clone()),
-        paths: vec![from_path.clone(), to_path.clone()],
-        source_paths: vec![from_path],
-        target_paths: vec![to_path],
+        path: Some(to_path),
+        from_path: Some(from_path),
+        paths,
+        source_paths,
+        target_paths,
     }
 }
 
 fn classify_copy_command(cwd: &str, path_args: &[String]) -> CommandSegmentSignal {
-    if path_args.len() != 2 {
-        return CommandSegmentSignal {
-            kind: TerminalCommandKind::Command,
-            path: None,
-            from_path: None,
-            paths: Vec::new(),
-            source_paths: Vec::new(),
-            target_paths: Vec::new(),
-        };
-    }
+    let Some((sources, destination)) = split_transfer_paths(path_args) else {
+        return empty_command_signal();
+    };
 
-    let from_path = resolve_path(cwd, &path_args[0]);
-    let to_path = resolve_path(cwd, &path_args[1]);
+    let source_paths: Vec<String> = sources
+        .iter()
+        .map(|source| resolve_path(cwd, source))
+        .collect();
+    let destination_is_dir = looks_like_directory_destination(destination) || sources.len() > 1;
+    let target_paths: Vec<String> = if destination_is_dir {
+        let destination_dir = resolve_path(cwd, destination.trim_end_matches('/'));
+        source_paths
+            .iter()
+            .map(|source| join_destination_dir(&destination_dir, source))
+            .collect()
+    } else {
+        vec![resolve_path(cwd, destination)]
+    };
+
+    let Some(from_path) = source_paths.first().cloned() else {
+        return empty_command_signal();
+    };
+    let Some(to_path) = target_paths.first().cloned() else {
+        return empty_command_signal();
+    };
+
+    let mut paths = source_paths.clone();
+    paths.extend(target_paths.iter().cloned());
 
     CommandSegmentSignal {
         kind: TerminalCommandKind::Copy,
-        path: Some(to_path.clone()),
-        from_path: Some(from_path.clone()),
-        paths: vec![from_path.clone(), to_path.clone()],
-        source_paths: vec![from_path],
-        target_paths: vec![to_path],
+        path: Some(to_path),
+        from_path: Some(from_path),
+        paths,
+        source_paths,
+        target_paths,
     }
+}
+
+fn empty_command_signal() -> CommandSegmentSignal {
+    CommandSegmentSignal {
+        kind: TerminalCommandKind::Command,
+        path: None,
+        from_path: None,
+        paths: Vec::new(),
+        source_paths: Vec::new(),
+        target_paths: Vec::new(),
+    }
+}
+
+fn split_transfer_paths(path_args: &[String]) -> Option<(&[String], &str)> {
+    if path_args.len() < 2 {
+        return None;
+    }
+    let (sources, destination) = path_args.split_at(path_args.len() - 1);
+    Some((sources, destination[0].as_str()))
+}
+
+fn looks_like_directory_destination(destination: &str) -> bool {
+    destination.ends_with('/') || destination.ends_with("/.") || destination == "."
+}
+
+fn join_destination_dir(destination_dir: &str, source_path: &str) -> String {
+    let file_name = Path::new(source_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(source_path);
+    Path::new(destination_dir)
+        .join(file_name)
+        .display()
+        .to_string()
 }
 
 fn classify_mkdir_command(cwd: &str, path_args: &[String]) -> CommandSegmentSignal {
@@ -813,6 +878,62 @@ mod tests {
             "/tmp/workspace/archive/reports/report.txt"
         );
         assert_eq!(raw.payload["from_path"], "/tmp/workspace/inbox/draft.txt");
+    }
+
+    #[test]
+    fn classifies_move_into_directory_destination() {
+        let raw = record_to_raw_event(&sample_record("mv inbox/report-1001.txt archive/")).unwrap();
+
+        assert_eq!(raw.payload["kind"], "move");
+        assert_eq!(
+            raw.payload["from_path"],
+            "/tmp/workspace/inbox/report-1001.txt"
+        );
+        assert_eq!(
+            raw.payload["path"],
+            "/tmp/workspace/archive/report-1001.txt"
+        );
+        assert_eq!(
+            raw.payload["target_paths"][0],
+            "/tmp/workspace/archive/report-1001.txt"
+        );
+    }
+
+    #[test]
+    fn classifies_multi_source_move_into_directory() {
+        let raw = record_to_raw_event(&sample_record(
+            "mv inbox/a.txt inbox/b.txt archive/",
+        ))
+        .unwrap();
+
+        assert_eq!(raw.payload["kind"], "move");
+        assert_eq!(raw.payload["path_count"], 4);
+        assert_eq!(
+            raw.payload["source_paths"],
+            serde_json::json!([
+                "/tmp/workspace/inbox/a.txt",
+                "/tmp/workspace/inbox/b.txt"
+            ])
+        );
+        assert_eq!(
+            raw.payload["target_paths"],
+            serde_json::json!([
+                "/tmp/workspace/archive/a.txt",
+                "/tmp/workspace/archive/b.txt"
+            ])
+        );
+    }
+
+    #[test]
+    fn classifies_copy_into_directory_destination() {
+        let raw = record_to_raw_event(&sample_record("cp inbox/report.txt review/")).unwrap();
+
+        assert_eq!(raw.payload["kind"], "copy");
+        assert_eq!(raw.payload["path"], "/tmp/workspace/review/report.txt");
+        assert_eq!(
+            raw.payload["from_path"],
+            "/tmp/workspace/inbox/report.txt"
+        );
     }
 
     #[test]

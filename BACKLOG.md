@@ -2,26 +2,18 @@
 
 ## Now
 
-### feat/terminal-command-patterns
-PR: feat: improve terminal command workflow understanding
-
-Goal:
-Improve parsing and normalization of repeated shell workflows beyond the NDJSON bridge.
-
-Acceptance:
-- cargo build passes
-- cargo test passes
-- richer terminal sequence signatures for repeated file-oriented shell workflows
-
-## Next
-
 ### feat/workflow-pack-registry-client
 PR: feat: add workflow pack registry client
 
 Goal:
 Support installing packs from a remote registry / hub.
 
----
+Acceptance:
+- cargo build passes
+- cargo test passes
+- `flowctl packs search` / install by pack id against a local or HTTPS registry index
+
+## Next
 
 ### docs/example-workflows
 PR: docs: expand example workflows for flowd
@@ -38,6 +30,7 @@ Only consider if there is a very strong privacy-safe local design.
 Enterprise-oriented, not needed for near-term MVP.
 
 ## Done recently
+- terminal `mv`/`cp` into directory destinations and multi-source transfers
 - optional `--features intelligence` client wiring to `flowd-intelligence`
 - richer `flowctl suggestions explain` output
 - workflow pack install (`flowctl packs install`)
