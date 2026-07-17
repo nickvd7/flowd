@@ -227,7 +227,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "flow-adapters"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "flow-core",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "flow-analysis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "flow-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "flow-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "flow-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -297,6 +297,7 @@ dependencies = [
  "flow-analysis",
  "flow-core",
  "flow-db",
+ "flow-exec",
  "rusqlite",
  "serde_json",
  "tempfile",
@@ -304,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "flow-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -318,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "flow-dsl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -328,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "flow-exec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -344,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "flow-patterns"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "flow-adapters",

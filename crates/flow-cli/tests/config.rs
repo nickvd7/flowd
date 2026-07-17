@@ -203,9 +203,11 @@ fn root_help_lists_discoverable_commands_and_examples() {
     );
     assert!(stdout.contains("suggestions"));
     assert!(stdout.contains("stats"));
+    assert!(stdout.contains("insights"));
     assert!(stdout.contains("config"));
     assert!(stdout.contains("flowctl suggestions explain 1"));
-    assert!(stdout.contains("flowctl automations show 1"));
+    assert!(stdout.contains("flowctl dry-run 1"));
+    assert!(stdout.contains("flowctl insights"));
 }
 
 #[test]

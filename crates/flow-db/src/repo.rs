@@ -1241,6 +1241,18 @@ pub fn list_automation_runs(conn: &Connection) -> rusqlite::Result<Vec<StoredAut
     rows.collect()
 }
 
+pub fn has_dry_run_for_automation(
+    conn: &Connection,
+    automation_id: i64,
+) -> rusqlite::Result<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM automation_runs WHERE automation_id = ?1 AND result = 'dry_run' LIMIT 1)",
+        [automation_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(exists != 0)
+}
+
 pub fn load_local_usage_stats(conn: &Connection) -> rusqlite::Result<LocalUsageStats> {
     conn.query_row(
         r#"
@@ -1494,6 +1506,13 @@ fn parse_json_value(value: &str) -> rusqlite::Result<Value> {
             Box::new(error),
         )
     })
+}
+
+pub fn load_events_for_session(
+    conn: &Connection,
+    session_id: i64,
+) -> rusqlite::Result<Vec<NormalizedEvent>> {
+    load_session_events(conn, session_id)
 }
 
 fn load_session_events(

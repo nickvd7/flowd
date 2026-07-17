@@ -3,8 +3,13 @@ observed_folders = ["~/Downloads"]
 observe_clipboard = false
 observe_browser_downloads = false
 browser_downloads_bridge_path = "~/.flowd/browser-downloads.ndjson"
-observe_terminal = true
+# Terminal observation reads an NDJSON bridge written by a local shell hook.
+observe_terminal = false
+terminal_history_bridge_path = "~/.flowd/terminal-history.ndjson"
 observe_active_window = false
+# When true, the daemon may execute matching approved automations after a
+# successful dry-run has already been recorded for that automation.
+auto_run_approved_automations = false
 redact_clipboard_content = true
 clipboard_store_redacted_preview = false
 clipboard_max_capture_bytes = 256
@@ -12,6 +17,7 @@ clipboard_poll_interval_ms = 1000
 redact_command_args = true
 strip_browser_query_strings = true
 suggestion_min_usefulness_score = 0.0
-intelligence_enabled = true
+# Private ranking stays off until a real intelligence client is wired.
+intelligence_enabled = false
 session_inactivity_secs = 300
 file_event_dedup_window_ms = 500

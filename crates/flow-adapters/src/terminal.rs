@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use flow_core::events::{EventSource, RawEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::{Component, Path, PathBuf};
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct TerminalHistoryRecord {
@@ -42,6 +45,82 @@ impl std::fmt::Display for TerminalHistoryError {
 }
 
 impl std::error::Error for TerminalHistoryError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalBridgeError {
+    Io(String),
+    InvalidRecord(String),
+}
+
+impl std::fmt::Display for TerminalBridgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(message) => write!(f, "{message}"),
+            Self::InvalidRecord(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for TerminalBridgeError {}
+
+impl From<TerminalHistoryError> for TerminalBridgeError {
+    fn from(value: TerminalHistoryError) -> Self {
+        Self::InvalidRecord(value.to_string())
+    }
+}
+
+/// Polls a local NDJSON terminal-history bridge, matching the browser download observer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalHistoryObserver {
+    bridge_path: PathBuf,
+    consumed_line_count: usize,
+    last_seen_content_len: usize,
+}
+
+impl TerminalHistoryObserver {
+    pub fn new(bridge_path: PathBuf) -> Self {
+        Self {
+            bridge_path,
+            consumed_line_count: 0,
+            last_seen_content_len: 0,
+        }
+    }
+
+    pub fn poll(&mut self) -> Result<Vec<RawEvent>, TerminalBridgeError> {
+        let content = match fs::read_to_string(&self.bridge_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(TerminalBridgeError::Io(format!(
+                    "failed to read terminal history bridge {}: {error}",
+                    self.bridge_path.display()
+                )))
+            }
+        };
+
+        let complete_lines: Vec<&str> = content
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .map(|line| line.trim_end_matches('\n'))
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+
+        if content.len() < self.last_seen_content_len
+            || complete_lines.len() < self.consumed_line_count
+        {
+            self.consumed_line_count = 0;
+        }
+
+        let mut events = Vec::new();
+        for line in complete_lines.iter().skip(self.consumed_line_count) {
+            events.push(history_line_to_raw_event(line)?);
+        }
+
+        self.consumed_line_count = complete_lines.len();
+        self.last_seen_content_len = content.len();
+        Ok(events)
+    }
+}
 
 pub fn history_line_to_raw_event(line: &str) -> Result<RawEvent, TerminalHistoryError> {
     let record: TerminalHistoryRecord = serde_json::from_str(line)
@@ -734,5 +813,41 @@ mod tests {
             "/tmp/workspace/archive/reports/report.txt"
         );
         assert_eq!(raw.payload["from_path"], "/tmp/workspace/inbox/draft.txt");
+    }
+
+    #[test]
+    fn observer_ingests_only_new_complete_records() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let bridge_path = dir.path().join("terminal-history.ndjson");
+        fs::write(
+            &bridge_path,
+            concat!(
+                "{\"ts\":\"2026-03-13T10:00:02Z\",\"cwd\":\"/tmp\",\"command\":\"mv a.pdf b.pdf\"}\n",
+                "{\"ts\":\"2026-03-13T10:00:03Z\",\"cwd\":\"/tmp\",\"command\":\"mkdir archive\"}"
+            ),
+        )
+        .unwrap();
+
+        let mut observer = TerminalHistoryObserver::new(bridge_path.clone());
+        let first_poll = observer.poll().unwrap();
+        assert_eq!(first_poll.len(), 1);
+        assert_eq!(first_poll[0].payload["command_name"], "mv");
+
+        assert!(observer.poll().unwrap().is_empty());
+
+        fs::write(
+            &bridge_path,
+            concat!(
+                "{\"ts\":\"2026-03-13T10:00:02Z\",\"cwd\":\"/tmp\",\"command\":\"mv a.pdf b.pdf\"}\n",
+                "{\"ts\":\"2026-03-13T10:00:03Z\",\"cwd\":\"/tmp\",\"command\":\"mkdir archive\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let third_poll = observer.poll().unwrap();
+        assert_eq!(third_poll.len(), 1);
+        assert_eq!(third_poll[0].payload["command_name"], "mkdir");
     }
 }

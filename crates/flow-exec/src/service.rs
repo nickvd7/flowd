@@ -5,8 +5,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use flow_core::events::{ActionType, NormalizedEvent};
 use flow_db::repo::{
-    get_automation, get_suggestion, increment_accepted, insert_automation, insert_automation_run,
-    list_automation_runs, load_automation_run, load_example_events_for_pattern,
+    get_automation, get_suggestion, has_dry_run_for_automation, increment_accepted,
+    insert_automation, insert_automation_run, insert_suggestion, list_automation_runs,
+    load_automation_run, load_events_for_session, load_example_events_for_pattern, upsert_pattern,
     set_automation_status, set_suggestion_status, AutomationRunRecord, StoredAutomationRun,
     AUTOMATION_STATUS_ACTIVE, AUTOMATION_STATUS_DISABLED, AUTOMATION_STATUS_FAILED,
 };
@@ -116,9 +117,18 @@ pub fn dry_run_automation(conn: &Connection, automation_id: i64) -> Result<DryRu
 }
 
 pub fn execute_automation(conn: &Connection, automation_id: i64) -> Result<ExecutionReport> {
+    execute_automation_with_force(conn, automation_id, false)
+}
+
+pub fn execute_automation_with_force(
+    conn: &Connection,
+    automation_id: i64,
+    force: bool,
+) -> Result<ExecutionReport> {
     let stored = load_stored_automation(conn, automation_id)?;
     ensure_automation_status(automation_id, &stored.status)?;
     let spec = flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")?;
+    ensure_dry_run_gate(conn, automation_id, &spec, force)?;
     let report = match execute(&spec) {
         Ok(report) => report,
         Err(error) => {
@@ -130,6 +140,92 @@ pub fn execute_automation(conn: &Connection, automation_id: i64) -> Result<Execu
     };
     store_run_record(conn, automation_id, "completed", &report)?;
     Ok(report)
+}
+
+fn ensure_dry_run_gate(
+    conn: &Connection,
+    automation_id: i64,
+    spec: &AutomationSpec,
+    force: bool,
+) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+
+    let requires_dry_run = spec
+        .safety
+        .as_ref()
+        .map(|safety| safety.dry_run_first)
+        .unwrap_or(true);
+    if !requires_dry_run {
+        return Ok(());
+    }
+
+    let has_dry_run = has_dry_run_for_automation(conn, automation_id)
+        .context("failed to check prior dry-run history")?;
+    if has_dry_run {
+        return Ok(());
+    }
+
+    bail!(
+        "automation {automation_id} requires a successful dry-run before run; \
+run `flowctl dry-run {automation_id}` first, or pass --force to override"
+    );
+}
+
+/// Create a pending suggestion from a demonstrated workflow session (teach-once).
+pub fn teach_from_session(conn: &Connection, session_id: i64) -> Result<i64> {
+    let events = load_events_for_session(conn, session_id)
+        .context("failed to load session events")?
+        .into_iter()
+        .collect::<Vec<_>>();
+    if events.is_empty() {
+        bail!("session {session_id} has no events to teach from");
+    }
+
+    // Match flow-db session signatures so approve can reload example events.
+    let signature = events
+        .iter()
+        .map(|event| {
+            let group = event
+                .metadata
+                .get("file_group")
+                .and_then(|value| value.as_str())
+                .unwrap_or("file");
+            format!("{:?}:{group}", event.action_type)
+        })
+        .collect::<Vec<_>>()
+        .join("->");
+    let summary = format!("Taught from session {session_id}: {signature}");
+    let created_at = Utc::now().to_rfc3339();
+    let duration_ms = events
+        .last()
+        .and_then(|last| {
+            events
+                .first()
+                .map(|first| last.ts.signed_duration_since(first.ts).num_milliseconds())
+        })
+        .unwrap_or(0)
+        .max(0);
+
+    // Validate that the demonstrated flow can become an automation before storing.
+    let _spec = compile_automation_spec(&summary, &events)
+        .context("session cannot be compiled into a rename/move automation")?;
+
+    let pattern_id = upsert_pattern(
+        conn,
+        &signature,
+        1,
+        duration_ms,
+        &summary,
+        &created_at,
+        1.0,
+        0.9,
+    )
+    .context("failed to store taught pattern")?;
+    let suggestion_id = insert_suggestion(conn, pattern_id, &summary, &created_at, 0.9)
+        .context("failed to store taught suggestion")?;
+    Ok(suggestion_id)
 }
 
 pub fn list_runs(conn: &Connection) -> Result<Vec<StoredAutomationRun>> {
@@ -915,6 +1011,65 @@ mod tests {
         assert!(preview.action_summary.is_empty());
         assert_eq!(preview.risk, PreviewRisk::High);
         assert_eq!(preview.notes.len(), 2);
+    }
+
+    #[test]
+    fn execute_requires_prior_dry_run_when_safety_says_so() {
+        use flow_db::{
+            open_database,
+            repo::{insert_automation, insert_pattern, insert_suggestion},
+        };
+
+        let dir = tempdir().unwrap();
+        let conn = open_database(dir.path().join("flowd.db")).unwrap();
+        let inbox = dir.path().join("inbox");
+        let archive = dir.path().join("archive");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("invoice-1001.pdf"), "invoice").unwrap();
+
+        let pattern_id = insert_pattern(
+            &conn,
+            "CreateFile:invoice",
+            2,
+            1_000,
+            "CreateFile -> RenameFile -> MoveFile",
+            "2026-03-12T12:00:00Z",
+            1.0,
+            0.9,
+        )
+        .unwrap();
+        let suggestion_id = insert_suggestion(
+            &conn,
+            pattern_id,
+            "Organize invoices",
+            "2026-03-12T12:00:00Z",
+            0.9,
+        )
+        .unwrap();
+
+        let spec = invoice_spec(&inbox, &archive);
+        let spec_yaml = serde_yaml::to_string(&spec).unwrap();
+        let automation_id = insert_automation(
+            &conn,
+            suggestion_id,
+            &spec_yaml,
+            AUTOMATION_STATUS_ACTIVE,
+            "invoice",
+            "2026-03-12T12:00:00Z",
+        )
+        .unwrap();
+
+        let blocked = execute_automation(&conn, automation_id).unwrap_err();
+        assert!(blocked.to_string().contains("dry-run"));
+
+        dry_run_automation(&conn, automation_id).unwrap();
+        let report = execute_automation(&conn, automation_id).unwrap();
+        assert!(!report.operations.is_empty());
+
+        // Recreate a matching file so --force can still execute after the first run.
+        std::fs::write(inbox.join("invoice-1002.pdf"), "invoice").unwrap();
+        let forced = execute_automation_with_force(&conn, automation_id, true).unwrap();
+        assert!(!forced.operations.is_empty());
     }
 
     #[test]

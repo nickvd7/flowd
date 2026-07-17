@@ -13,20 +13,24 @@
 
 ## v0.2
 - browser event bridge
-- terminal macro suggestions
-- improved pattern ranking
+- terminal history bridge observer
+- teach-from-session
+- dry-run-first enforcement
+- workflow pack install
+- usage insights
 - replay and fixture tooling
 - better safety filtering
 
 ## v0.3
+- live private intelligence client wiring
 - local LLM labeling
 - semantic clustering
 - personalization and feedback memory
-- anti-annoyance policy
-- private intelligence integration
+- anti-annoyance policy refinements
+- event-triggered automation polish
 
 ## Non-goals for early versions
-- cloud sync
+- cloud sync of capture data
 - full autonomous computer control
 - destructive shell automation
-- deep instrumentation of every app
+- deep instrumentation of every app / screen recording

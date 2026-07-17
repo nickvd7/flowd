@@ -26,8 +26,8 @@ use flow_db::{
 use flow_dsl::{Action, AutomationSpec, WorkflowPackManifest};
 use flow_exec::{
     approve_suggestion, disable_automation, dry_run_automation, enable_automation,
-    execute_automation, list_runs, preview_automation, preview_suggestion, undo_automation_run,
-    AutomationPreview,
+    execute_automation_with_force, list_runs, preview_automation, preview_suggestion,
+    teach_from_session, undo_automation_run, AutomationPreview,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -44,13 +44,15 @@ use std::{
 const ROOT_AFTER_HELP: &str = "\
 Examples:
   flowctl setup --watch ~/Downloads
+  flowctl status
   flowctl config show
   flowctl suggestions
   flowctl suggestions explain 1
-  flowctl suggestions history
+  flowctl teach from-session 1
   flowctl approve 1
-  flowctl automations show 1
-  flowctl watch
+  flowctl dry-run 1
+  flowctl run 1
+  flowctl insights
   flowctl watch --events --patterns";
 
 const CONFIG_AFTER_HELP: &str = "\
@@ -74,6 +76,7 @@ Examples:
   flowctl automations show 1
   flowctl dry-run 1
   flowctl run 1
+  flowctl run 1 --force
   flowctl runs";
 
 const INTELLIGENCE_AFTER_HELP: &str = "\
@@ -99,7 +102,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    #[command(about = "Show flowd status")]
+    #[command(about = "Show concise local health status")]
     Status,
     #[command(about = "Run lightweight local health checks for flowd")]
     Doctor,
@@ -120,8 +123,18 @@ enum Commands {
     },
     #[command(about = "Show local workflow and automation totals")]
     Stats,
+    #[command(about = "Show usage insights: top workflows, time saved, unused suggestions")]
+    Insights,
     #[command(about = "List detected repeated workflow patterns")]
     Patterns,
+    #[command(
+        about = "Teach flowd a workflow from a demonstrated session",
+        after_help = "Examples:\n  flowctl teach from-session 3\n  flowctl teach from-session --latest"
+    )]
+    Teach {
+        #[command(subcommand)]
+        command: TeachCommand,
+    },
     #[command(about = "Print concise suggestion summaries")]
     Suggest {
         #[arg(long)]
@@ -195,7 +208,14 @@ enum Commands {
     #[command(about = "Re-enable a disabled automation")]
     Enable { automation_id: i64 },
     #[command(about = "Execute an automation against matching files")]
-    Run { automation_id: i64 },
+    Run {
+        automation_id: i64,
+        #[arg(
+            long,
+            help = "Skip the dry-run-first safety gate (not recommended)"
+        )]
+        force: bool,
+    },
     #[command(about = "Preview an automation without changing files")]
     DryRun { automation_id: i64 },
     #[command(about = "List automation run history")]
@@ -226,6 +246,27 @@ enum PacksCommand {
     List,
     #[command(about = "Validate a workflow pack directory")]
     Validate { path: PathBuf },
+    #[command(about = "Install a validated workflow pack into the local packs directory")]
+    Install {
+        path: PathBuf,
+        #[arg(long, help = "Overwrite an existing installed pack with the same id")]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TeachCommand {
+    #[command(about = "Create a pending suggestion from a demonstrated session")]
+    FromSession {
+        #[arg(
+            value_name = "SESSION_ID",
+            required_unless_present = "latest",
+            conflicts_with = "latest"
+        )]
+        session_id: Option<i64>,
+        #[arg(long, help = "Use the most recent session")]
+        latest: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -281,12 +322,18 @@ fn run() -> anyhow::Result<()> {
     };
 
     match cli.command {
-        Some(Commands::Status) => println!("flowd status: template skeleton"),
+        Some(Commands::Status) => render_doctor(&context)?,
         Some(Commands::Doctor) => render_doctor(&context)?,
         Some(Commands::Setup { .. }) => unreachable!("setup is handled before runtime config"),
         Some(Commands::Config { command }) => render_config_command(&context, command)?,
         Some(Commands::Stats) => render_stats(&context)?,
+        Some(Commands::Insights) => render_insights(&context)?,
         Some(Commands::Patterns) => render_patterns(&context)?,
+        Some(Commands::Teach { command }) => match command {
+            TeachCommand::FromSession { session_id, latest } => {
+                teach_from_session_command(&context, session_id, latest)?
+            }
+        },
         Some(Commands::Suggest { explain }) => render_suggestions(&context, explain)?,
         Some(Commands::Suggestions { command, explain }) => match command {
             Some(SuggestionsCommand::Explain { suggestion_id }) => {
@@ -302,6 +349,7 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Packs { command }) => match command.unwrap_or(PacksCommand::List) {
             PacksCommand::List => render_packs_list(&context)?,
             PacksCommand::Validate { path } => validate_pack_command(&path)?,
+            PacksCommand::Install { path, force } => install_pack_command(&path, force)?,
         },
         Some(Commands::Intelligence { command }) => match command {
             IntelligenceCommand::ExportFeedback {
@@ -343,7 +391,10 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Enable { automation_id }) => {
             enable_automation_command(&context, automation_id)?
         }
-        Some(Commands::Run { automation_id }) => run_automation_command(&context, automation_id)?,
+        Some(Commands::Run {
+            automation_id,
+            force,
+        }) => run_automation_command(&context, automation_id, force)?,
         Some(Commands::DryRun { automation_id }) => {
             dry_run_automation_command(&context, automation_id)?
         }
@@ -486,20 +537,12 @@ fn render_next_steps(steps: &[String]) -> Vec<String> {
 }
 
 fn render_packs_list(_context: &RuntimeContext) -> anyhow::Result<()> {
-    // v0.1: list packs by scanning the standard config/packs directory.
-    let packs_root = match flow_core::config::standard_config_path() {
-        Some(config_path) => config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("packs"),
-        None => PathBuf::from("~/.config/flowd/packs"),
-    };
-
-    let packs_root = flow_core::config::expand_home(packs_root.to_string_lossy().as_ref());
+    let packs_root = packs_root_path();
 
     if !packs_root.is_dir() {
         println!("No workflow packs directory at {}", packs_root.display());
         println!("Use 'flowctl packs validate <path>' to validate a local pack folder.");
+        println!("Install with: flowctl packs install <path>");
         return Ok(());
     }
 
@@ -559,13 +602,7 @@ fn render_packs_list(_context: &RuntimeContext) -> anyhow::Result<()> {
 }
 
 fn validate_pack_command(pack_dir: &Path) -> anyhow::Result<()> {
-    let manifest_path = pack_dir.join("workflow-pack.toml");
-    let manifest_str = fs::read_to_string(&manifest_path).with_context(|| {
-        format!("failed to read workflow pack manifest at {}", manifest_path.display())
-    })?;
-
-    let manifest: WorkflowPackManifest = flow_dsl::parse_pack_manifest(&manifest_str)
-        .with_context(|| format!("failed to parse manifest at {}", manifest_path.display()))?;
+    let manifest = validate_pack(pack_dir)?;
 
     println!("Pack id: {}", manifest.pack.id);
     println!("Name: {}", manifest.pack.name);
@@ -576,28 +613,48 @@ fn validate_pack_command(pack_dir: &Path) -> anyhow::Result<()> {
     println!("Automations: {}", manifest.automation.len());
     println!();
 
-    let mut had_error = false;
-
     for automation_ref in &manifest.automation {
         let spec_path = pack_dir.join(&automation_ref.file);
         println!("Validating automation spec: {}", spec_path.display());
+        let yaml = fs::read_to_string(&spec_path)
+            .with_context(|| format!("failed to read spec {}", spec_path.display()))?;
+        let spec = flow_dsl::parse_spec(&yaml)
+            .with_context(|| format!("failed to parse automation spec {}", spec_path.display()))?;
+        println!("  ok: id='{}', actions={}", spec.id, spec.actions.len());
+    }
+
+    Ok(())
+}
+
+fn validate_pack(pack_dir: &Path) -> anyhow::Result<WorkflowPackManifest> {
+    let manifest_path = pack_dir.join("workflow-pack.toml");
+    let manifest_str = fs::read_to_string(&manifest_path).with_context(|| {
+        format!("failed to read workflow pack manifest at {}", manifest_path.display())
+    })?;
+
+    let manifest: WorkflowPackManifest = flow_dsl::parse_pack_manifest(&manifest_str)
+        .with_context(|| format!("failed to parse manifest at {}", manifest_path.display()))?;
+
+    let mut had_error = false;
+    for automation_ref in &manifest.automation {
+        let spec_path = pack_dir.join(&automation_ref.file);
         let yaml = match fs::read_to_string(&spec_path) {
             Ok(contents) => contents,
             Err(error) => {
-                eprintln!("  error: failed to read spec: {error}");
+                eprintln!(
+                    "error: failed to read spec {}: {error}",
+                    spec_path.display()
+                );
                 had_error = true;
                 continue;
             }
         };
-
-        match flow_dsl::parse_spec(&yaml) {
-            Ok(spec) => {
-                println!("  ok: id='{}', actions={}", spec.id, spec.actions.len());
-            }
-            Err(error) => {
-                eprintln!("  error: failed to parse automation spec: {error}");
-                had_error = true;
-            }
+        if let Err(error) = flow_dsl::parse_spec(&yaml) {
+            eprintln!(
+                "error: failed to parse automation spec {}: {error}",
+                spec_path.display()
+            );
+            had_error = true;
         }
     }
 
@@ -605,6 +662,72 @@ fn validate_pack_command(pack_dir: &Path) -> anyhow::Result<()> {
         anyhow::bail!("one or more automation specs failed validation");
     }
 
+    Ok(manifest)
+}
+
+fn install_pack_command(pack_dir: &Path, force: bool) -> anyhow::Result<()> {
+    let manifest = validate_pack(pack_dir)?;
+    let packs_root = packs_root_path();
+    let destination = packs_root.join(&manifest.pack.id);
+
+    if destination.exists() {
+        if !force {
+            anyhow::bail!(
+                "pack '{}' is already installed at {}; pass --force to overwrite",
+                manifest.pack.id,
+                destination.display()
+            );
+        }
+        fs::remove_dir_all(&destination).with_context(|| {
+            format!("failed to remove existing pack at {}", destination.display())
+        })?;
+    }
+
+    fs::create_dir_all(&packs_root)
+        .with_context(|| format!("failed to create packs directory {}", packs_root.display()))?;
+    copy_dir_recursive(pack_dir, &destination).with_context(|| {
+        format!(
+            "failed to install pack from {} to {}",
+            pack_dir.display(),
+            destination.display()
+        )
+    })?;
+
+    println!(
+        "Installed pack '{}' v{} to {}",
+        manifest.pack.id,
+        manifest.pack.version,
+        destination.display()
+    );
+    println!("Inspect with: flowctl packs list");
+    Ok(())
+}
+
+fn packs_root_path() -> PathBuf {
+    match flow_core::config::standard_config_path() {
+        Some(config_path) => config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("packs"),
+        None => expand_home("~/.config/flowd/packs"),
+    }
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&from, &to)?;
+        }
+    }
     Ok(())
 }
 
@@ -751,6 +874,99 @@ fn render_stats(context: &RuntimeContext) -> anyhow::Result<()> {
         println!("{line}");
     }
 
+    Ok(())
+}
+
+fn render_insights(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let stats = load_local_usage_stats(&conn).context("failed to read local usage stats")?;
+    let patterns = list_patterns(&conn).context("failed to read patterns")?;
+    let suggestions = list_suggestions(&conn).context("failed to read suggestions")?;
+    let automations = list_automations(&conn).context("failed to read automations")?;
+
+    println!("Usage insights");
+    println!(
+        "estimated_time_saved: {}",
+        format_duration(stats.estimated_time_saved_ms)
+    );
+    println!(
+        "automation_runs: {} completed · {} undone",
+        stats.automation_run_count, stats.undo_run_count
+    );
+    println!();
+
+    println!("Top workflows");
+    if patterns.is_empty() {
+        println!("  (none yet — keep working in watched folders)");
+    } else {
+        for pattern in patterns.iter().take(5) {
+            println!(
+                "  · {}×  {}  (score {:.2})",
+                pattern.count, pattern.canonical_summary, pattern.usefulness_score
+            );
+        }
+    }
+    println!();
+
+    println!("Top automations");
+    let mut ranked = automations;
+    ranked.sort_by(|left, right| {
+        right
+            .run_count
+            .cmp(&left.run_count)
+            .then_with(|| left.automation_id.cmp(&right.automation_id))
+    });
+    if ranked.is_empty() {
+        println!("  (none approved yet)");
+    } else {
+        for automation in ranked.iter().take(5) {
+            println!(
+                "  · #{}  {}  runs={}  status={}",
+                automation.automation_id,
+                automation.summary,
+                automation.run_count,
+                automation.status
+            );
+        }
+    }
+    println!();
+
+    println!("Unused suggestions: {}", suggestions.len());
+    for suggestion in suggestions.iter().take(5) {
+        println!(
+            "  · #{}  {}",
+            suggestion.suggestion_id, suggestion.proposal_text
+        );
+    }
+    if suggestions.len() > 5 {
+        println!("  … and {} more", suggestions.len() - 5);
+    }
+
+    Ok(())
+}
+
+fn teach_from_session_command(
+    context: &RuntimeContext,
+    session_id: Option<i64>,
+    latest: bool,
+) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let resolved_id = if latest {
+        list_sessions(&conn)
+            .context("failed to list sessions")?
+            .into_iter()
+            .max_by_key(|session| session.session_id)
+            .map(|session| session.session_id)
+            .ok_or_else(|| anyhow::anyhow!("no sessions available to teach from"))?
+    } else {
+        session_id.ok_or_else(|| anyhow::anyhow!("session id is required"))?
+    };
+
+    let suggestion_id = teach_from_session(&conn, resolved_id)
+        .context("failed to create suggestion from session")?;
+    println!("Taught suggestion {suggestion_id} from session {resolved_id}.");
+    println!("Inspect: flowctl suggestions explain {suggestion_id}");
+    println!("Approve: flowctl approve {suggestion_id}");
     Ok(())
 }
 
@@ -1683,10 +1899,14 @@ fn dry_run_automation_command(context: &RuntimeContext, automation_id: i64) -> a
     Ok(())
 }
 
-fn run_automation_command(context: &RuntimeContext, automation_id: i64) -> anyhow::Result<()> {
+fn run_automation_command(
+    context: &RuntimeContext,
+    automation_id: i64,
+    force: bool,
+) -> anyhow::Result<()> {
     let conn = open_cli_database(context)?;
-    let report =
-        execute_automation(&conn, automation_id).context("failed to execute automation")?;
+    let report = execute_automation_with_force(&conn, automation_id, force)
+        .context("failed to execute automation")?;
 
     if report.operations.is_empty() {
         println!("No matching files.");
@@ -2661,7 +2881,10 @@ mod tests {
     #[test]
     fn bypass_flag_disables_intelligence_ranking() {
         // The command path should remain easy to bypass even when a client exists.
-        let config = Config::default();
+        let config = Config {
+            intelligence_enabled: true,
+            ..Config::default()
+        };
         unsafe {
             std::env::set_var("FLOWD_BYPASS_INTELLIGENCE_RANKING", "true");
         }

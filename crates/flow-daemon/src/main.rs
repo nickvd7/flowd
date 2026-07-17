@@ -6,9 +6,12 @@ use clap::Parser;
 use flow_adapters::browser::{BrowserBridgeError, BrowserDownloadsObserver};
 use flow_adapters::clipboard::{ClipboardObserver, ClipboardReadError, CommandClipboardReader};
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
+use flow_adapters::terminal::{TerminalBridgeError, TerminalHistoryObserver};
 use flow_analysis::catch_up_analysis;
 use flow_core::config::{expand_home, Config};
 use flow_db::open_database as open_sqlite_database;
+use flow_db::repo::list_automations;
+use flow_exec::execute_automation;
 use observation::ObservationPipeline;
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -43,6 +46,7 @@ fn run() -> Result<()> {
         ObservationPipeline::new(Duration::milliseconds(config.file_event_dedup_window_ms));
     let mut clipboard = build_clipboard_observer(&config);
     let mut browser_downloads = build_browser_downloads_observer(&config);
+    let mut terminal_history = build_terminal_history_observer(&config);
 
     for path in &observed_paths {
         watch_path(&mut watcher, path)
@@ -69,12 +73,24 @@ fn run() -> Result<()> {
         );
     }
 
+    if config.observe_terminal {
+        println!(
+            "terminal observation enabled at {}",
+            expand_home(&config.terminal_history_bridge_path).display()
+        );
+    }
+
+    if config.auto_run_approved_automations {
+        println!("auto-run of approved automations enabled (requires a prior dry-run)");
+    }
+
     loop {
         match rx.recv_timeout(std::time::Duration::from_millis(
             config.clipboard_poll_interval_ms,
         )) {
             Ok(result) => match result {
                 Ok(event) => {
+                    let mut accepted_file_event = false;
                     for file_event in event_to_file_events(&event) {
                         let Some(raw_event) = observation
                             .accept(&conn, file_event)
@@ -83,9 +99,13 @@ fn run() -> Result<()> {
                             continue;
                         };
 
+                        accepted_file_event = true;
                         catch_up_analysis(&mut conn, config.session_inactivity_secs)
                             .context("failed during analysis refresh")?;
                         println!("{}", serde_json::to_string(&raw_event)?);
+                    }
+                    if accepted_file_event && config.auto_run_approved_automations {
+                        maybe_auto_run_approved_automations(&conn)?;
                     }
                 }
                 Err(error) => eprintln!("watch error: {error}"),
@@ -124,6 +144,22 @@ fn run() -> Result<()> {
                 Err(error) => handle_browser_bridge_error(error),
             }
         }
+
+        if let Some(observer) = terminal_history.as_mut() {
+            match observer.poll() {
+                Ok(raw_events) => {
+                    for raw_event in raw_events {
+                        observation
+                            .accept_raw_event(&conn, raw_event.clone())
+                            .context("failed during terminal observation")?;
+                        catch_up_analysis(&mut conn, config.session_inactivity_secs)
+                            .context("failed during analysis refresh")?;
+                        println!("{}", serde_json::to_string(&raw_event)?);
+                    }
+                }
+                Err(error) => handle_terminal_bridge_error(error),
+            }
+        }
     }
 
     Ok(())
@@ -152,12 +188,57 @@ fn build_browser_downloads_observer(config: &Config) -> Option<BrowserDownloadsO
     ))
 }
 
+fn build_terminal_history_observer(config: &Config) -> Option<TerminalHistoryObserver> {
+    if !config.observe_terminal {
+        return None;
+    }
+
+    Some(TerminalHistoryObserver::new(expand_home(
+        &config.terminal_history_bridge_path,
+    )))
+}
+
+fn maybe_auto_run_approved_automations(conn: &Connection) -> Result<()> {
+    let automations = list_automations(conn).context("failed to list automations for auto-run")?;
+    for automation in automations
+        .into_iter()
+        .filter(|automation| automation.status == "active")
+    {
+        match execute_automation(conn, automation.automation_id) {
+            Ok(report) if report.operations.is_empty() => {}
+            Ok(report) => {
+                for operation in report.operations {
+                    println!(
+                        "auto-run {}: {} -> {}",
+                        automation.automation_id, operation.from, operation.to
+                    );
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("dry-run") {
+                    continue;
+                }
+                eprintln!(
+                    "auto-run error for automation {}: {error:#}",
+                    automation.automation_id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn handle_clipboard_error(error: ClipboardReadError) {
     eprintln!("clipboard observation error: {error}");
 }
 
 fn handle_browser_bridge_error(error: BrowserBridgeError) {
     eprintln!("browser download observation error: {error}");
+}
+
+fn handle_terminal_bridge_error(error: TerminalBridgeError) {
+    eprintln!("terminal observation error: {error}");
 }
 
 fn resolve_observed_paths(config: &Config) -> Result<Vec<PathBuf>> {

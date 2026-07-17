@@ -834,6 +834,7 @@ fn run_executes_safe_file_automation_and_records_result() {
     std::fs::create_dir_all(temp_dir.path().join("inbox")).unwrap();
     std::fs::write(temp_dir.path().join("inbox/invoice-1004.pdf"), "invoice").unwrap();
 
+    dry_run_suggestion_automation(&db_path);
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
         .env("FLOWD_DB_PATH", &db_path)
@@ -871,6 +872,7 @@ fn runs_lists_completed_execution_history() {
     std::fs::create_dir_all(temp_dir.path().join("inbox")).unwrap();
     std::fs::write(temp_dir.path().join("inbox/invoice-1006.pdf"), "invoice").unwrap();
 
+    dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
         .env("FLOWD_DB_PATH", &db_path)
@@ -902,6 +904,7 @@ fn undo_reverses_a_completed_rename_and_move_run_in_reverse_order() {
     std::fs::create_dir_all(temp_dir.path().join("inbox")).unwrap();
     std::fs::write(temp_dir.path().join("inbox/invoice-1007.pdf"), "invoice").unwrap();
 
+    dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
         .env("FLOWD_DB_PATH", &db_path)
@@ -910,7 +913,7 @@ fn undo_reverses_a_completed_rename_and_move_run_in_reverse_order() {
     assert!(run.status.success());
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
-        .args(["undo", "1"])
+        .args(["undo", "2"])
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -920,7 +923,7 @@ fn undo_reverses_a_completed_rename_and_move_run_in_reverse_order() {
     let move_index = stdout.find("move:").unwrap();
     let rename_index = stdout.find("rename:").unwrap();
     assert!(move_index < rename_index);
-    assert!(stdout.contains("Undid automation run 1."));
+    assert!(stdout.contains("Undid automation run 2."));
     assert!(temp_dir.path().join("inbox/invoice-1007.pdf").exists());
     assert!(!temp_dir
         .path()
@@ -948,6 +951,7 @@ fn undo_aborts_when_filesystem_state_is_no_longer_safe() {
     std::fs::create_dir_all(temp_dir.path().join("inbox")).unwrap();
     std::fs::write(temp_dir.path().join("inbox/invoice-1008.pdf"), "invoice").unwrap();
 
+    dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
         .env("FLOWD_DB_PATH", &db_path)
@@ -958,7 +962,7 @@ fn undo_aborts_when_filesystem_state_is_no_longer_safe() {
     std::fs::write(temp_dir.path().join("inbox/invoice-1008.pdf"), "collision").unwrap();
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
-        .args(["undo", "1"])
+        .args(["undo", "2"])
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -991,6 +995,7 @@ fn undo_restores_a_completed_rename_only_run() {
     std::fs::create_dir_all(&inbox).unwrap();
     std::fs::write(inbox.join("invoice-1009.pdf"), "invoice").unwrap();
 
+    dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
         .env("FLOWD_DB_PATH", &db_path)
@@ -1000,7 +1005,7 @@ fn undo_restores_a_completed_rename_only_run() {
     assert!(inbox.join("invoice-1009-reviewed.pdf").exists());
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
-        .args(["undo", "1"])
+        .args(["undo", "2"])
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1019,6 +1024,7 @@ fn undo_restores_a_completed_move_only_run() {
     std::fs::create_dir_all(&inbox).unwrap();
     std::fs::write(inbox.join("invoice-1010.pdf"), "invoice").unwrap();
 
+    dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
         .env("FLOWD_DB_PATH", &db_path)
@@ -1028,7 +1034,7 @@ fn undo_restores_a_completed_move_only_run() {
     assert!(archive.join("invoice-1010.pdf").exists());
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
-        .args(["undo", "1"])
+        .args(["undo", "2"])
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1083,7 +1089,7 @@ fn run_blocks_disabled_automation_without_mutating_files() {
     assert!(disable.status.success());
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
-        .args(["run", "1"])
+        .args(["run", "1", "--force"])
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1115,8 +1121,10 @@ fn run_marks_automation_failed_when_execution_errors() {
     seed_database(&db_path);
     approve_suggestion(&db_path);
 
+    // Intentionally leave the trigger directory missing so execution fails.
+    // Skip the dry-run gate with --force so we exercise the failure path.
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
-        .args(["run", "1"])
+        .args(["run", "1", "--force"])
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1617,6 +1625,20 @@ fn approve_suggestion(db_path: &Path) {
         .unwrap();
 
     assert!(output.status.success());
+}
+
+fn dry_run_suggestion_automation(db_path: &Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args(["dry-run", "1"])
+        .env("FLOWD_DB_PATH", db_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn seed_manual_automation(db_path: &Path, spec: AutomationSpec) {

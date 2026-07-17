@@ -1,63 +1,20 @@
-
-## `flowd/BACKLOG.md`
-```md
 # BACKLOG
 
 ## Now
 
-### feat/workflow-pack-support
-PR: feat: add workflow pack support
+### feat/intelligence-client-wiring
+PR: feat: wire optional private intelligence client
 
 Goal:
-Add installable workflow packs with:
-- workflow-pack.toml
-- validation
-- local installation
-- compatibility with existing automation specs
+Connect `flowd-intelligence` behind a feature flag / client implementation so
+`intelligence_enabled = true` does more than the local noop boundary.
 
 Acceptance:
 - cargo build passes
 - cargo test passes
-- local workflow packs can be installed safely
+- open-core remains fully functional with intelligence disabled
 
 ---
-
-### feat/flowctl-doctor
-PR: feat: add flowctl doctor diagnostics command
-
-Goal:
-Add a CLI diagnostic command that checks:
-- daemon
-- database
-- watch paths
-- event ingestion
-- patterns
-- suggestions
-- automations
-- intelligence client state if enabled
-
-Acceptance:
-- cargo build passes
-- cargo test passes
-- doctor output is clear and deterministic
-
----
-
-### feat/flowctl-watch-improvements
-PR: feat: improve flowctl watch event visibility and filtering
-
-Goal:
-Improve `flowctl watch` with:
-- category labels
-- less noise
-- optional filters
-
-Acceptance:
-- cargo build passes
-- cargo test passes
-- output is more useful for dogfooding and debugging
-
-## Next
 
 ### feat/suggestions-explain-improvements
 PR: feat: improve suggestion explainability output
@@ -70,27 +27,7 @@ Make explanations clearer with:
 - estimated usefulness
 - representative traces
 
----
-
-### feat/usage-insights
-PR: feat: add flowctl insights command
-
-Goal:
-Show:
-- most common workflows
-- top automations
-- estimated time saved
-- unused suggestions
-
----
-
-### docs/example-workflows
-PR: docs: add example workflows for flowd
-
-Goal:
-Add 8–10 realistic workflow examples and link them from README.
-
-## Later
+## Next
 
 ### feat/workflow-pack-registry-client
 PR: feat: add workflow pack registry client
@@ -104,12 +41,27 @@ Support installing packs from a remote registry / hub.
 PR: feat: improve terminal command workflow understanding
 
 Goal:
-Improve parsing and normalization of repeated shell workflows.
+Improve parsing and normalization of repeated shell workflows beyond the NDJSON bridge.
 
-## Icebox
+### docs/example-workflows
+PR: docs: expand example workflows for flowd
+
+Goal:
+Keep 8–10 realistic workflow examples current and linked from README.
+
+## Later
 
 ### feat/browser-automation-bridge
 Only consider if there is a very strong privacy-safe local design.
 
 ### feat/team-admin-controls
 Enterprise-oriented, not needed for near-term MVP.
+
+## Done recently
+- workflow pack install (`flowctl packs install`)
+- `flowctl doctor` / `flowctl status`
+- `flowctl insights`
+- dry-run-first enforcement
+- terminal history bridge observer
+- teach-from-session
+- CI workflow for cargo build/test

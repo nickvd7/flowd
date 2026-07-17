@@ -12,6 +12,7 @@ flow-adapters = { path = "../flow-adapters" }
 flow-analysis = { path = "../flow-analysis" }
 flow-core = { path = "../flow-core" }
 flow-db = { path = "../flow-db" }
+flow-exec = { path = "../flow-exec" }
 rusqlite.workspace = true
 serde_json.workspace = true
 

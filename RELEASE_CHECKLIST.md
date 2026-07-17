@@ -1,13 +1,15 @@
 # Release Checklist
 
-- [ ] `cargo build` succeeds
-- [ ] `cargo test --workspace` succeeds
-- [ ] fixture replay tests pass
-- [ ] full open-core loop passes in automation: observe -> detect -> suggest -> approve -> dry-run -> run -> undo
-- [ ] dry-run behavior reviewed
-- [ ] execution behavior reviewed
-- [ ] undo behavior reviewed
-- [ ] safety filters reviewed
-- [ ] sample config matches implementation
-- [ ] docs reflect current code
-- [ ] all contributor-facing text is in English
+- [x] `cargo build` succeeds
+- [x] `cargo test --workspace` succeeds
+- [x] fixture replay tests pass
+- [x] full open-core loop passes in automation: observe -> detect -> suggest -> approve -> dry-run -> run -> undo
+- [x] dry-run behavior reviewed (required before `run` unless `--force`)
+- [x] execution behavior reviewed
+- [x] undo behavior reviewed
+- [x] safety filters reviewed
+- [x] sample config matches implementation
+- [x] docs reflect current code
+- [x] all contributor-facing text is in English
+- [ ] GitHub release notes drafted for `v0.2.0`
+- [ ] tagged release cut after merge

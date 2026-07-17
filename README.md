@@ -6,22 +6,31 @@
 
 Local-first, terminal-first workflow automation for repeated file workflows.
 
-> Status: upcoming `v0.2` pre-release. The project is usable for local evaluation and demos, but it is still pre-release software.
+> Status: `v0.2.0` pre-release. Usable for local evaluation and demos; still evolving.
 
 flowd observes local file workflows, detects repeated patterns, and suggests automations you can approve from the terminal.
 
 - Local-first
 - Terminal-first
 - Deterministic automations
-- Safe approvals with undo
+- Safe approvals with dry-run + undo
 - Explainable suggestions
-- Local history and usage stats
+- Local history and usage insights
 
 ## What is flowd?
 
 flowd solves a simple problem: many file workflows are repetitive, but writing automation rules by hand is tedious. It watches local activity, recognizes repeated sequences such as rename and move actions, and turns them into suggestions you can inspect before anything is automated.
 
-The current implementation is focused on deterministic, file-oriented workflows. It includes filesystem observation, terminal, clipboard, and browser download adapters, suggestion explainability, suggestion history, local usage stats, first-run onboarding, and approval-driven execution with undo. Approved automations run locally, and the system remains useful without any cloud service or separate intelligence layer.
+The current implementation is focused on deterministic, file-oriented workflows:
+
+- filesystem observation (default)
+- optional clipboard and browser-download bridges
+- optional terminal-history bridge (NDJSON)
+- teach-once from a demonstrated session
+- suggestion explainability, history, stats/insights
+- approval-driven execution with required dry-run and undo
+
+Approved automations run locally via `flowctl run` (or optional daemon auto-run after a dry-run). The system remains useful without any cloud service or private intelligence layer.
 
 ## Demo
 
@@ -46,7 +55,19 @@ $ flowctl approve 3
 Approved suggestion 3 as automation 1
 ```
 
-After approval, future matching files can be handled by the generated automation instead of repeating the same manual steps.
+After approval, dry-run the automation, then run it when matching files appear:
+
+```bash
+$ flowctl dry-run 1
+$ flowctl run 1
+```
+
+For rare workflows, demonstrate once and teach from that session:
+
+```bash
+$ flowctl teach from-session --latest
+$ flowctl approve <suggestion_id>
+```
 
 For more realistic cases, see [Example Workflows](docs/example-workflows.md).
 
@@ -112,8 +133,10 @@ observed_folders = ["~/Downloads"]
 observe_clipboard = false
 observe_browser_downloads = false
 browser_downloads_bridge_path = "~/.flowd/browser-downloads.ndjson"
-observe_terminal = true
+observe_terminal = false
+terminal_history_bridge_path = "~/.flowd/terminal-history.ndjson"
 observe_active_window = false
+auto_run_approved_automations = false
 redact_clipboard_content = true
 clipboard_store_redacted_preview = false
 clipboard_max_capture_bytes = 256
@@ -121,7 +144,7 @@ clipboard_poll_interval_ms = 1000
 redact_command_args = true
 strip_browser_query_strings = true
 suggestion_min_usefulness_score = 0.0
-intelligence_enabled = true
+intelligence_enabled = false
 session_inactivity_secs = 300
 file_event_dedup_window_ms = 500
 ```
@@ -145,10 +168,13 @@ observe -> detect patterns -> suggest automations -> inspect -> approve -> dry-r
 Useful commands:
 
 ```bash
+flowctl status
 flowctl config show
 flowctl stats
+flowctl insights
 flowctl patterns
 flowctl sessions
+flowctl teach from-session --latest
 flowctl watch
 flowctl watch --events
 flowctl watch --patterns
@@ -160,6 +186,8 @@ flowctl suggestions history
 flowctl approve <suggestion_id>
 flowctl reject <suggestion_id>
 flowctl snooze <suggestion_id>
+flowctl packs validate ./examples/packs/demo-pack
+flowctl packs install ./examples/packs/demo-pack
 flowctl automations
 flowctl automations show <automation_id>
 flowctl dry-run <automation_id>
@@ -200,13 +228,13 @@ filesystem events
 
 `flowd` is the open-core workflow engine. It owns event capture, persistence, sessions, pattern detection, baseline suggestions, automations, execution, undo, and explainability plumbing.
 
-An optional private decision layer, `flowd-intelligence`, can improve suggestion quality through ranking, timing, suppression, personalization, clustering, wording, and display decisions. The integration direction is one-way:
+An optional private decision layer, `flowd-intelligence`, can improve suggestion quality through ranking, timing, suppression, personalization, clustering, wording, and display decisions. The open-core boundary exists today; a live client is not wired by default (`intelligence_enabled = false`). The integration direction is one-way:
 
 ```text
 flowd -> flowd-intelligence
 ```
 
-flowd remains fully functional without the intelligence layer.
+flowd remains fully functional without the intelligence layer. See [Privacy](docs/privacy.md).
 
 Workspace crates:
 

@@ -55,7 +55,9 @@ pub struct Config {
     pub observe_browser_downloads: bool,
     pub browser_downloads_bridge_path: String,
     pub observe_terminal: bool,
+    pub terminal_history_bridge_path: String,
     pub observe_active_window: bool,
+    pub auto_run_approved_automations: bool,
     pub redact_clipboard_content: bool,
     pub clipboard_store_redacted_preview: bool,
     pub clipboard_max_capture_bytes: usize,
@@ -76,8 +78,10 @@ impl Default for Config {
             observe_clipboard: false,
             observe_browser_downloads: false,
             browser_downloads_bridge_path: "~/.flowd/browser-downloads.ndjson".to_string(),
-            observe_terminal: true,
+            observe_terminal: false,
+            terminal_history_bridge_path: "~/.flowd/terminal-history.ndjson".to_string(),
             observe_active_window: false,
+            auto_run_approved_automations: false,
             redact_clipboard_content: true,
             clipboard_store_redacted_preview: false,
             clipboard_max_capture_bytes: 256,
@@ -85,7 +89,7 @@ impl Default for Config {
             redact_command_args: true,
             strip_browser_query_strings: true,
             suggestion_min_usefulness_score: 0.0,
-            intelligence_enabled: true,
+            intelligence_enabled: false,
             session_inactivity_secs: 300,
             file_event_dedup_window_ms: 500,
         }
@@ -140,6 +144,13 @@ impl Config {
         if self.observe_browser_downloads && self.browser_downloads_bridge_path.trim().is_empty() {
             return Err(FlowError::Validation(
                 "browser_downloads_bridge_path must not be empty when browser download observation is enabled"
+                    .to_string(),
+            ));
+        }
+
+        if self.observe_terminal && self.terminal_history_bridge_path.trim().is_empty() {
+            return Err(FlowError::Validation(
+                "terminal_history_bridge_path must not be empty when terminal observation is enabled"
                     .to_string(),
             ));
         }
@@ -328,15 +339,20 @@ mod tests {
     fn default_config_has_expected_values() {
         let cfg = Config::default();
         assert_eq!(cfg.database_path, "./flowd.db");
-        assert!(cfg.observe_terminal);
+        assert!(!cfg.observe_terminal);
         assert!(cfg.redact_command_args);
-        assert!(cfg.intelligence_enabled);
+        assert!(!cfg.intelligence_enabled);
+        assert!(!cfg.auto_run_approved_automations);
         assert_eq!(cfg.session_inactivity_secs, 300);
         assert_eq!(cfg.file_event_dedup_window_ms, 500);
         assert!(!cfg.observe_browser_downloads);
         assert_eq!(
             cfg.browser_downloads_bridge_path,
             "~/.flowd/browser-downloads.ndjson"
+        );
+        assert_eq!(
+            cfg.terminal_history_bridge_path,
+            "~/.flowd/terminal-history.ndjson"
         );
         assert_eq!(
             cfg.clipboard_capture_mode(),
@@ -363,7 +379,8 @@ observed_folders = ["~/Inbox"]
         assert_eq!(cfg.observed_folders, vec!["~/Inbox".to_string()]);
         assert!(!cfg.observe_clipboard);
         assert!(!cfg.observe_browser_downloads);
-        assert!(cfg.observe_terminal);
+        assert!(!cfg.observe_terminal);
+        assert!(!cfg.intelligence_enabled);
         assert_eq!(cfg.suggestion_min_usefulness_score, 0.0);
     }
 
