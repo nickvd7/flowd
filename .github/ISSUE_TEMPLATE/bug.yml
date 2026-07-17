@@ -1,0 +1,69 @@
+name: Bug report
+description: Something in open-core flowd is broken or unsafe.
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Prefer **reproducible** open-core bugs here.
+        Do **not** paste secrets, API keys, or full personal file trees.
+        Support process: [docs/support.md](https://github.com/nickvd7/flowd/blob/main/docs/support.md)
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI (flowctl)
+        - Daemon
+        - Suggestions / patterns
+        - Execution / dry-run / undo
+        - Path allowlist / safety
+        - Packs / registry
+        - Install / packaging
+        - Docs / website
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: `flowctl --version` or git SHA
+      placeholder: "0.3.0 or abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Expected vs actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps. Redact personal paths if needed (e.g. ~/Downloads/…).
+      placeholder: |
+        1. flowctl setup --watch ~/Downloads
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: Relevant CLI output or daemon log snippets (redacted)
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues first
+          required: true
+        - label: I redacted secrets and sensitive paths
+          required: true
+        - label: This is about open-core behavior (not a Private Intelligence access request)
+          required: true

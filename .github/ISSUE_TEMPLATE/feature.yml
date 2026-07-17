@@ -1,0 +1,41 @@
+name: Feature request
+description: A concrete open-core capability request (not a vague wishlist).
+title: "feat: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep requests aligned with the product promise: local-first file workflows,
+        approval, dry-run, undo. See docs/roadmap-v1.md non-goals.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What repeated workflow friction does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Likely layer
+      options:
+        - Open-core engine
+        - Private Intelligence (ranking/timing/wording)
+        - Docs / website / packaging
+        - Unsure
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked roadmap non-goals (no cloud sync, no general desktop agent, no deletes)
+          required: true

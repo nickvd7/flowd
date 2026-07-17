@@ -9,6 +9,17 @@ All project text must be written in English, including:
 - issue discussions
 - pull request descriptions
 
+## Support and issues
+
+User support and bug reports go through GitHub Issue templates (not blank
+issues). Read [Support](docs/support.md) for channels, labels, and triage.
+
+- Open-core bugs / usage → [new issue](https://github.com/nickvd7/flowd/issues/new/choose)
+- Private Intelligence commercial / evaluation → [flowd.net contact](https://flowd.net/#contact)
+
+When picking up work from issues: prefer items that left `needs-triage`, include
+a repro, and link PRs with `Fixes #NNN`.
+
 ## Local setup
 
 ```bash

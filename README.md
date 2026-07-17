@@ -8,6 +8,8 @@ Local-first, terminal-first workflow automation for repeated file workflows.
 
 > Status: `v0.3.0` pre-release on the road to `1.0.0`. Usable for local evaluation; see [roadmap to 1.0](docs/roadmap-v1.md).
 
+**Support:** open-core bugs and usage help via [GitHub Issues](https://github.com/nickvd7/flowd/issues/new/choose). Private Intelligence / commercial questions via [flowd.net contact](https://flowd.net/#contact). Process: [Support](docs/support.md).
+
 flowd observes local file workflows, detects repeated patterns, and suggests automations you can approve from the terminal.
 
 - Local-first open-core engine

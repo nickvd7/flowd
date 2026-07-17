@@ -1,0 +1,62 @@
+name: Suggestion quality / dogfood note
+description: False positive, missed workflow, noisy suggestion, or trust issue from real use.
+title: "quality: "
+labels: ["suggestion-quality", "dogfood", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These notes feed the 1.0 quality bar and Private Intelligence tuning.
+        Prefer patterns over one-off anecdotes. Redact personal filenames when possible.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - False positive (should not have suggested)
+        - Missed opportunity (repeated workflow never suggested)
+        - Timing (too early / too late)
+        - Wording unclear
+        - Trust / safety concern
+        - Intelligence ranking / delay / suppress (if enabled)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: intelligence
+    attributes:
+      label: Intelligence build?
+      options:
+        - Open-core only (no intelligence feature)
+        - Built with --features intelligence, intelligence_enabled=true
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow (redacted)
+      description: What you repeatedly do (sources, rename/move shape). Avoid full home-directory dumps.
+      placeholder: "Download invoice PDFs → rename *-reviewed → move to ~/Documents/Accounting/Invoices"
+    validations:
+      required: true
+  - type: textarea
+    id: what-flowd-did
+    attributes:
+      label: What flowd showed / did
+      description: Suggestion text, explain output, or “nothing appeared”
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: What would have been useful?
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I redacted secrets and sensitive paths
+          required: true

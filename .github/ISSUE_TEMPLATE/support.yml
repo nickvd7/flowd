@@ -1,0 +1,54 @@
+name: Support / how do I…
+description: Help using open-core flowd (setup, config, commands, docs).
+title: "support: "
+labels: ["support", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for **usage help** on the open-core engine.
+        For Private Intelligence evaluation or commercial questions, use [flowd.net contact](https://flowd.net/#contact).
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      options:
+        - Install / first run
+        - Daemon lifecycle
+        - Config / observed folders
+        - Suggestions / approve / reject / snooze
+        - Dry-run / run / undo / runs show
+        - Packs / policy
+        - Privacy / what is stored
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What did you already try?
+      description: Commands, docs pages, error messages (redacted)
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Linux x86_64 / macOS …"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked docs/support.md and the FAQ on flowd.net
+          required: true
+        - label: I redacted secrets and sensitive paths
+          required: true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private / commercial support
+    url: https://flowd.net/#contact
+    about: Product questions about Private Intelligence, evaluation access, or non-public support. Do not paste sensitive paths or secrets.
+  - name: Documentation
+    url: https://github.com/nickvd7/flowd/blob/main/docs/support.md
+    about: How open-core support and Private Intelligence support are routed.

@@ -119,8 +119,15 @@ Use these lines in homepage, README, and release notes:
 - **Intelligence:** “Private Intelligence decides which suggestions surface, when, and how they’re worded — so the CLI stays quiet and useful.”
 - **Boundary:** “Turn intelligence off and the engine still works. Decision quality is the paid layer; capture and execution stay open and local.”
 
+## Support
+
+- Open-core bugs / usage → public [GitHub Issues](https://github.com/nickvd7/flowd/issues/new/choose)
+- Intelligence evaluation / commercial → [flowd.net contact](https://flowd.net/#contact)
+- Process: [Support](./support.md)
+
 ## Related docs
 
+- [Support](./support.md)
 - [System Overview](./system-overview.md)
 - [Architecture](./architecture.md)
 - [Privacy](./privacy.md)
