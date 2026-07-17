@@ -67,3 +67,64 @@ pub struct WorkflowPackManifest {
 pub fn parse_pack_manifest(toml_str: &str) -> Result<WorkflowPackManifest, DslError> {
     Ok(toml::from_str(toml_str)?)
 }
+
+/// Metadata for a pack registry index (local file or HTTPS).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackRegistryMeta {
+    pub name: String,
+    pub schema_version: u32,
+}
+
+/// One pack listed in a registry index.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackRegistryEntry {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Directory containing `workflow-pack.toml`, relative to the registry index.
+    pub path: String,
+}
+
+/// Pack registry index consumed by `flowctl packs search|install`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackRegistryIndex {
+    pub registry: PackRegistryMeta,
+    #[serde(default)]
+    pub packs: Vec<PackRegistryEntry>,
+}
+
+pub fn parse_pack_registry_index(toml_str: &str) -> Result<PackRegistryIndex, DslError> {
+    Ok(toml::from_str(toml_str)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pack_registry_index() {
+        let index = parse_pack_registry_index(
+            r#"
+[registry]
+name = "example"
+schema_version = 1
+
+[[packs]]
+id = "demo.rename-downloads"
+name = "Demo Rename Downloads"
+version = "0.1.0"
+description = "Example pack"
+path = "../packs/demo-pack"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(index.registry.name, "example");
+        assert_eq!(index.registry.schema_version, 1);
+        assert_eq!(index.packs.len(), 1);
+        assert_eq!(index.packs[0].id, "demo.rename-downloads");
+        assert_eq!(index.packs[0].path, "../packs/demo-pack");
+    }
+}

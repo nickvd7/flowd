@@ -1,0 +1,10 @@
+[registry]
+name = "flowd example registry"
+schema_version = 1
+
+[[packs]]
+id = "demo.rename-downloads"
+name = "Demo Rename Downloads"
+version = "0.1.0"
+description = "Example pack with a single automation for renaming downloads."
+path = "../packs/demo-pack"

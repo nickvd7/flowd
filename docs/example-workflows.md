@@ -82,10 +82,10 @@ Rename those exports to the usual project naming pattern and move them into the 
 ## 7. Terminal-driven inbox cleanup
 
 **Repeated user behavior**  
-You use terminal commands such as `mv` to rename and relocate files from a staging folder into project folders.
+You use terminal commands such as `mv inbox/report.pdf archive/` or `mv a.txt b.txt archive/` to relocate one or more files from a staging folder into project folders.
 
 **What flowd detects**  
-Repeated terminal-observed rename and move flows that map to the same underlying file operations.
+Repeated terminal-observed rename and move flows, including moves into directory destinations and multi-source transfers, that map to the same underlying file operations.
 
 **What automation could be suggested**  
 A file automation that applies the same rename and move sequence without requiring you to repeat the manual terminal cleanup.

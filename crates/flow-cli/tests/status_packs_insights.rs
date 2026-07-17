@@ -76,6 +76,56 @@ fn packs_install_copies_validated_pack() {
 }
 
 #[test]
+fn packs_search_and_install_from_local_registry() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let xdg = home.join(".config");
+    fs::create_dir_all(&xdg).unwrap();
+
+    let registry = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/registry/index.toml");
+    let search = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args([
+            "packs",
+            "search",
+            "rename",
+            "--registry",
+            registry.to_str().unwrap(),
+        ])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .output()
+        .unwrap();
+    assert!(
+        search.status.success(),
+        "{}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let search_stdout = String::from_utf8(search.stdout).unwrap();
+    assert!(search_stdout.contains("demo.rename-downloads"));
+    assert!(search_stdout.contains("flowd example registry"));
+
+    let install = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
+        .args([
+            "packs",
+            "install",
+            "demo.rename-downloads",
+            "--registry",
+            registry.to_str().unwrap(),
+        ])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let installed = xdg.join("flowd/packs/demo.rename-downloads/workflow-pack.toml");
+    assert!(installed.is_file(), "missing {}", installed.display());
+}
+
+#[test]
 fn run_without_dry_run_is_blocked() {
     use flow_db::{
         open_database,

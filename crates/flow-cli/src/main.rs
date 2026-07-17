@@ -1,6 +1,9 @@
+mod pack_registry;
+
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
+use pack_registry::{LoadedRegistry, RegistrySource};
 use flow_analysis::intelligence_boundary::{
     build_envelope_from_contexts, map_stored_suggestions_to_contexts, ExplainabilitySource,
     IntelligenceBoundary, IntelligenceClient, InternalFeedbackSummary, InternalPatternMetadata,
@@ -248,9 +251,27 @@ enum PacksCommand {
     List,
     #[command(about = "Validate a workflow pack directory")]
     Validate { path: PathBuf },
+    #[command(about = "Search packs in a local or HTTPS registry index")]
+    Search {
+        #[arg(help = "Optional case-insensitive filter on id, name, or description")]
+        query: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH_OR_URL",
+            help = "Registry index path or HTTPS URL (TOML)"
+        )]
+        registry: String,
+    },
     #[command(about = "Install a validated workflow pack into the local packs directory")]
     Install {
-        path: PathBuf,
+        #[arg(help = "Local pack directory, or pack id when --registry is set")]
+        path_or_id: String,
+        #[arg(
+            long,
+            value_name = "PATH_OR_URL",
+            help = "Install by pack id from a local or HTTPS registry index"
+        )]
+        registry: Option<String>,
         #[arg(long, help = "Overwrite an existing installed pack with the same id")]
         force: bool,
     },
@@ -351,7 +372,14 @@ fn run() -> anyhow::Result<()> {
         Some(Commands::Packs { command }) => match command.unwrap_or(PacksCommand::List) {
             PacksCommand::List => render_packs_list(&context)?,
             PacksCommand::Validate { path } => validate_pack_command(&path)?,
-            PacksCommand::Install { path, force } => install_pack_command(&path, force)?,
+            PacksCommand::Search { query, registry } => {
+                search_packs_command(query.as_deref(), &registry)?
+            }
+            PacksCommand::Install {
+                path_or_id,
+                registry,
+                force,
+            } => install_pack_command(&path_or_id, registry.as_deref(), force)?,
         },
         Some(Commands::Intelligence { command }) => match command {
             IntelligenceCommand::ExportFeedback {
@@ -545,6 +573,9 @@ fn render_packs_list(_context: &RuntimeContext) -> anyhow::Result<()> {
         println!("No workflow packs directory at {}", packs_root.display());
         println!("Use 'flowctl packs validate <path>' to validate a local pack folder.");
         println!("Install with: flowctl packs install <path>");
+        println!(
+            "Or search a registry: flowctl packs search --registry ./examples/registry/index.toml"
+        );
         return Ok(());
     }
 
@@ -667,7 +698,66 @@ fn validate_pack(pack_dir: &Path) -> anyhow::Result<WorkflowPackManifest> {
     Ok(manifest)
 }
 
-fn install_pack_command(pack_dir: &Path, force: bool) -> anyhow::Result<()> {
+fn search_packs_command(query: Option<&str>, registry: &str) -> anyhow::Result<()> {
+    let loaded = LoadedRegistry::load(RegistrySource::parse(registry))?;
+    let matches = loaded.search(query);
+
+    println!(
+        "Registry: {} ({})",
+        loaded.index.registry.name,
+        loaded.source.display()
+    );
+    if matches.is_empty() {
+        println!("No matching packs.");
+        return Ok(());
+    }
+
+    for entry in matches {
+        println!(
+            "{}\t{}\t{}\t{}",
+            entry.id,
+            entry.name,
+            entry.version,
+            entry.description.as_deref().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+fn install_pack_command(
+    path_or_id: &str,
+    registry: Option<&str>,
+    force: bool,
+) -> anyhow::Result<()> {
+    if let Some(registry) = registry {
+        return install_pack_from_registry(path_or_id, registry, force);
+    }
+
+    let pack_dir = PathBuf::from(path_or_id);
+    if !pack_dir.is_dir() {
+        anyhow::bail!(
+            "'{path_or_id}' is not a local pack directory; pass --registry <path-or-url> to install by pack id"
+        );
+    }
+    install_pack_from_directory(&pack_dir, force)
+}
+
+fn install_pack_from_registry(pack_id: &str, registry: &str, force: bool) -> anyhow::Result<()> {
+    let loaded = LoadedRegistry::load(RegistrySource::parse(registry))?;
+    let entry = loaded.find_pack(pack_id)?;
+    let temp_dir = tempfile::tempdir().context("failed to create temporary pack directory")?;
+    let staged = temp_dir.path().join("pack");
+    loaded.materialize_pack(entry, &staged)?;
+    install_pack_from_directory(&staged, force)?;
+    println!(
+        "Source registry: {} ({})",
+        loaded.index.registry.name,
+        loaded.source.display()
+    );
+    Ok(())
+}
+
+fn install_pack_from_directory(pack_dir: &Path, force: bool) -> anyhow::Result<()> {
     let manifest = validate_pack(pack_dir)?;
     let packs_root = packs_root_path();
     let destination = packs_root.join(&manifest.pack.id);

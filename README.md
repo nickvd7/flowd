@@ -69,7 +69,7 @@ $ flowctl teach from-session --latest
 $ flowctl approve <suggestion_id>
 ```
 
-For more realistic cases, see [Example Workflows](docs/example-workflows.md).
+For more realistic cases, see [Example Workflows](docs/example-workflows.md). To install shared packs from a local or HTTPS index, see [Pack Registry](docs/pack-registry.md).
 
 ## Installation
 
@@ -188,6 +188,8 @@ flowctl reject <suggestion_id>
 flowctl snooze <suggestion_id>
 flowctl packs validate ./examples/packs/demo-pack
 flowctl packs install ./examples/packs/demo-pack
+flowctl packs search --registry ./examples/registry/index.toml
+flowctl packs install demo.rename-downloads --registry ./examples/registry/index.toml
 flowctl automations
 flowctl automations show <automation_id>
 flowctl dry-run <automation_id>

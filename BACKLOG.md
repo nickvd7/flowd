@@ -2,24 +2,11 @@
 
 ## Now
 
-### feat/workflow-pack-registry-client
-PR: feat: add workflow pack registry client
-
-Goal:
-Support installing packs from a remote registry / hub.
-
-Acceptance:
-- cargo build passes
-- cargo test passes
-- `flowctl packs search` / install by pack id against a local or HTTPS registry index
+_(empty — pick from Later when prioritized)_
 
 ## Next
 
-### docs/example-workflows
-PR: docs: expand example workflows for flowd
-
-Goal:
-Keep 8–10 realistic workflow examples current and linked from README.
+_(empty — pick from Later when prioritized)_
 
 ## Later
 
@@ -30,6 +17,8 @@ Only consider if there is a very strong privacy-safe local design.
 Enterprise-oriented, not needed for near-term MVP.
 
 ## Done recently
+- example workflows refreshed for terminal directory/`mv` patterns
+- workflow pack registry client (`flowctl packs search` / install by id)
 - terminal `mv`/`cp` into directory destinations and multi-source transfers
 - optional `--features intelligence` client wiring to `flowd-intelligence`
 - richer `flowctl suggestions explain` output
