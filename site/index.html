@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>flowd — automation that learns by watching your files</title>
-<meta name="description" content="flowd watches repeated local file workflows, suggests automations, and waits for your approval. Local-first. Terminal-first. Nothing leaves your machine.">
+<meta name="description" content="flowd watches repeated local file workflows, suggests automations, and waits for your approval. Local-first. Terminal-first. Path allowlist, dry-run, undo. Nothing leaves your machine.">
 <meta property="og:title" content="flowd — stop repeating yourself">
-<meta property="og:description" content="Local-first, terminal-first workflow automation. Observe, detect, approve, dry-run, run, undo.">
+<meta property="og:description" content="Local-first, terminal-first workflow automation. Observe, detect, approve, dry-run, run, undo — with an audit trail.">
 <meta property="og:url" content="https://flowd.net">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80' fill='%233fb950' font-family='monospace'>~</text></svg>">
 <style>
@@ -24,6 +24,7 @@
   --blue: #58a6ff;
   --red: #f85149;
   --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  --nav-h: 64px;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html { scroll-behavior: smooth; }
@@ -35,6 +36,7 @@ body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
+body.menu-open { overflow: hidden; }
 body::before {
   content: "";
   position: fixed;
@@ -52,19 +54,159 @@ body::before {
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-nav {
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: rgba(10, 14, 18, 0.92);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--border);
+  min-height: var(--nav-h);
+  gap: 16px;
 }
-nav .logo { color: var(--green); font-weight: bold; font-size: 17px; letter-spacing: 0.04em; }
-nav .logo .tilde { color: var(--dim); }
-nav .links a { color: var(--dim); margin-left: 18px; font-size: 13px; }
-nav .links a:hover { color: var(--text); text-decoration: none; }
+.logo { color: var(--green); font-weight: bold; font-size: 17px; letter-spacing: 0.04em; }
+.logo .tilde { color: var(--dim); }
 
-header { padding: 64px 0 28px; }
+.menu-toggle {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.menu-toggle:hover { border-color: var(--green-dim); color: var(--green); }
+.menu-toggle:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+.burger {
+  width: 18px;
+  height: 12px;
+  position: relative;
+  display: block;
+}
+.burger span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  transition: transform 0.2s ease, opacity 0.2s ease, top 0.2s ease;
+}
+.burger span:nth-child(1) { top: 0; }
+.burger span:nth-child(2) { top: 5px; }
+.burger span:nth-child(3) { top: 10px; }
+.menu-toggle[aria-expanded="true"] .burger span:nth-child(1) {
+  top: 5px;
+  transform: rotate(45deg);
+}
+.menu-toggle[aria-expanded="true"] .burger span:nth-child(2) { opacity: 0; }
+.menu-toggle[aria-expanded="true"] .burger span:nth-child(3) {
+  top: 5px;
+  transform: rotate(-45deg);
+}
+
+.nav-drawer {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 50;
+  background: rgba(10, 14, 18, 0.98);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.55);
+  transform: translateY(-110%);
+  transition: transform 0.28s ease;
+  visibility: hidden;
+}
+.nav-drawer.open {
+  transform: translateY(0);
+  visibility: visible;
+}
+.nav-drawer-inner {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 18px 24px 28px;
+}
+.nav-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.nav-drawer-title {
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.menu-close {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  font-family: var(--mono);
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.menu-close:hover { border-color: var(--green-dim); color: var(--green); }
+.menu-close:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+.nav-links {
+  display: grid;
+  gap: 4px;
+}
+.nav-links a {
+  display: block;
+  color: var(--text);
+  padding: 12px 10px;
+  border-radius: 8px;
+  font-size: 16px;
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+.nav-links a:hover,
+.nav-links a:focus-visible {
+  background: rgba(63, 185, 80, 0.08);
+  border-color: var(--border);
+  color: var(--green);
+  text-decoration: none;
+}
+.nav-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.28s ease;
+}
+.nav-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+header { padding: 48px 0 28px; }
 .eyebrow {
   display: inline-flex;
   align-items: center;
@@ -77,9 +219,9 @@ header { padding: 64px 0 28px; }
   border-radius: 6px;
   margin-bottom: 18px;
 }
-.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 h1 {
-  font-size: clamp(32px, 6vw, 48px);
+  font-size: clamp(28px, 7vw, 48px);
   font-weight: 600;
   letter-spacing: -0.6px;
   color: #e8eef4;
@@ -95,11 +237,11 @@ h1 .cursor {
   animation: blink 1.1s steps(1) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
-.tagline { color: var(--dim); font-size: 16px; margin: 18px 0 0; max-width: 560px; }
+.tagline { color: var(--dim); font-size: clamp(14px, 3.5vw, 16px); margin: 18px 0 0; max-width: 640px; }
 .cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 28px; }
 .btn {
   display: inline-block;
-  padding: 9px 18px;
+  padding: 11px 18px;
   border-radius: 6px;
   font-size: 14px;
   border: 1px solid var(--green-dim);
@@ -126,10 +268,16 @@ h1 .cursor {
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
 }
-.dot { width: 11px; height: 11px; border-radius: 50%; }
+.dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
 .dot.r { background: #ff5f56; } .dot.y { background: #ffbd2e; } .dot.g { background: #27c93f; }
 .term-title { margin-left: auto; margin-right: auto; color: var(--faint); font-size: 12px; }
-.term-body { padding: 20px 22px; font-size: 13.5px; line-height: 1.75; min-height: 300px; }
+.term-body {
+  padding: 18px;
+  font-size: clamp(12px, 3.2vw, 13.5px);
+  line-height: 1.75;
+  min-height: 280px;
+  overflow-x: auto;
+}
 .term-body .ps1 { color: var(--green); }
 .term-body .cmd { color: #e8eef4; }
 .term-body .out { color: var(--dim); }
@@ -140,13 +288,13 @@ h1 .cursor {
 .trust-line { color: var(--faint); font-size: 12px; margin-bottom: 32px; }
 
 section { padding: 44px 0; border-top: 1px solid var(--border); }
-h2 { font-size: 22px; color: #e8eef4; margin-bottom: 8px; font-weight: 600; }
+h2 { font-size: clamp(18px, 4vw, 22px); color: #e8eef4; margin-bottom: 8px; font-weight: 600; }
 h2::before { content: "## "; color: var(--faint); font-weight: normal; }
 .section-sub { color: var(--dim); margin-bottom: 24px; font-size: 14px; max-width: 640px; }
 
 .loop {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px;
 }
 .loop-step { padding: 4px 0 8px; border-top: 2px solid var(--green-dim); }
@@ -160,23 +308,39 @@ h2::before { content: "## "; color: var(--faint); font-weight: normal; }
 .stack-item p { color: var(--dim); font-size: 13.5px; max-width: 640px; }
 .stack-item code { color: var(--text); background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
 
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.chip {
+  border: 1px solid var(--border);
+  background: rgba(15, 20, 26, 0.8);
+  color: var(--dim);
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 999px;
+}
+.chip strong { color: var(--green); font-weight: 600; }
+
 pre.code {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 18px 20px;
+  padding: 16px;
   overflow-x: auto;
-  font-size: 13.5px;
+  font-size: clamp(12px, 3.1vw, 13.5px);
   line-height: 1.8;
+  -webkit-overflow-scrolling: touch;
 }
 pre.code .cm { color: var(--faint); }
 pre.code .kw { color: var(--green); }
 
 .compare { display: grid; gap: 14px; }
-.compare-row { display: grid; grid-template-columns: 140px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.compare-row { display: grid; grid-template-columns: minmax(120px, 160px) 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .compare-row .label { color: var(--green); font-size: 13px; }
 .compare-row .body { color: var(--dim); font-size: 13.5px; }
-@media (max-width: 560px) { .compare-row { grid-template-columns: 1fr; gap: 4px; } }
 
 .faq details { border-bottom: 1px solid var(--border); padding: 14px 0; }
 .faq summary { cursor: pointer; color: #e8eef4; font-size: 15px; list-style: none; }
@@ -193,10 +357,10 @@ pre.code .kw { color: var(--green); }
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 10px 12px;
+  padding: 12px;
   color: var(--text);
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: 16px;
   outline: none;
 }
 .field input:focus, .field textarea:focus { border-color: var(--green-dim); }
@@ -220,34 +384,56 @@ footer {
   gap: 12px;
 }
 footer .heart { color: var(--red); }
-@media (max-width: 640px) {
-  nav .links a { margin-left: 12px; font-size: 12px; }
+
+@media (max-width: 720px) {
+  .wrap { padding: 0 16px; }
+  header { padding-top: 36px; }
+  .compare-row { grid-template-columns: 1fr; gap: 4px; }
+  .loop { grid-template-columns: 1fr 1fr; }
+  .nav-drawer-inner { padding-left: 16px; padding-right: 16px; }
+}
+@media (max-width: 480px) {
+  .loop { grid-template-columns: 1fr; }
+  .cta .btn { width: 100%; text-align: center; }
+  footer { flex-direction: column; }
 }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<nav>
-  <div class="logo"><span class="tilde">~/</span>flowd</div>
-  <div class="links">
-    <a href="#how">how</a>
-    <a href="#privacy">privacy</a>
-    <a href="#compare">compare</a>
-    <a href="#install">install</a>
-    <a href="#faq">faq</a>
-    <a href="https://github.com/nickvd7/flowd">github</a>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <a class="logo" href="#top" id="top"><span class="tilde">~/</span>flowd</a>
+      <button
+        class="menu-toggle"
+        id="menu-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="nav-drawer"
+        aria-label="Open menu"
+      >
+        <span class="burger" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+      </button>
+    </div>
   </div>
-</nav>
 
 <header>
-  <div class="eyebrow"><span class="dot" aria-hidden="true"></span>v0.2 · local-first · open source</div>
+  <div class="eyebrow"><span class="dot" aria-hidden="true"></span>v0.3 · road to 1.0 · local-first · open source</div>
   <h1>flowd<span class="cursor"></span><br><span class="accent">Some file work needs you.<br>A lot of it doesn’t.</span></h1>
-  <p class="tagline">flowd watches repeated local file workflows, suggests automations, and waits for your approval. Nothing leaves your machine.</p>
+  <p class="tagline">flowd watches repeated local file workflows, suggests automations, and waits for your approval. Path allowlist, dry-run, undo, and an inspectable audit trail — nothing leaves your machine.</p>
   <div class="cta">
     <a class="btn primary" href="#install">$ install</a>
     <a class="btn ghost" href="https://github.com/nickvd7/flowd">view source</a>
-    <span class="prerelease">⚠ pre-release</span>
+    <span class="prerelease">⚠ v0.3 pre-release</span>
+  </div>
+  <div class="chips" aria-label="Recent capabilities">
+    <span class="chip"><strong>new</strong> path allowlist</span>
+    <span class="chip"><strong>new</strong> daemon lifecycle</span>
+    <span class="chip"><strong>new</strong> runs show / audit</span>
+    <span class="chip"><strong>new</strong> pack registry</span>
   </div>
 </header>
 
@@ -258,7 +444,7 @@ footer .heart { color: var(--red); }
   </div>
   <div class="term-body" id="term"></div>
 </div>
-<p class="trust-line">Runs on your machine · SQLite state · dry-run before run · undo when you change your mind</p>
+<p class="trust-line">Runs on your machine · SQLite state · allowlisted paths · dry-run before run · undo + audit</p>
 
 <section id="how">
   <h2>how it works</h2>
@@ -267,7 +453,30 @@ footer .heart { color: var(--red); }
     <div class="loop-step"><div class="n">01 observe</div><h3>Watch locally</h3><p>Filesystem events in folders you choose. Optional clipboard, downloads, and terminal bridges.</p></div>
     <div class="loop-step"><div class="n">02 detect</div><h3>Spot repeats</h3><p>Rename/move sequences become patterns with counts, recency, and explainable scores.</p></div>
     <div class="loop-step"><div class="n">03 approve</div><h3>You decide</h3><p>Inspect, approve, reject, or snooze. Or teach once from a demonstrated session.</p></div>
-    <div class="loop-step"><div class="n">04 run</div><h3>Safe execute</h3><p>Dry-run first, then run. Every completed run can be undone.</p></div>
+    <div class="loop-step"><div class="n">04 run</div><h3>Safe execute</h3><p>Dry-run first, then run. Every completed run can be undone and inspected with <code>runs show</code>.</p></div>
+  </div>
+</section>
+
+<section id="whats-new">
+  <h2>what's new</h2>
+  <p class="section-sub">Hardening on the road to 1.0 — still local-first, still approval-driven.</p>
+  <div class="stack">
+    <div class="stack-item">
+      <h3>execution path allowlist</h3>
+      <p>Dry-run, run, undo, and daemon auto-run stay inside <code>observed_folders</code> / <code>execution_allowed_roots</code>, including symlink escape checks.</p>
+    </div>
+    <div class="stack-item">
+      <h3>daemon lifecycle</h3>
+      <p><code>flowctl daemon start|stop|status|install-service</code> with systemd/launchd templates, crash recovery, and log guidance.</p>
+    </div>
+    <div class="stack-item">
+      <h3>audit trail</h3>
+      <p>Every dry-run, apply, and undo is recorded. Inspect with <code>flowctl runs</code> and <code>flowctl runs show &lt;id&gt;</code>.</p>
+    </div>
+    <div class="stack-item">
+      <h3>packs &amp; polish</h3>
+      <p>Workflow pack registry, terminal <code>mv</code>/<code>cp</code> into directories, team policy packs, and a simulated dogfood harness for regressions.</p>
+    </div>
   </div>
 </section>
 
@@ -285,7 +494,7 @@ footer .heart { color: var(--red); }
     </div>
     <div class="stack-item">
       <h3>inspectable safety</h3>
-      <p><code>flowctl status</code>, <code>suggestions --explain</code>, and plain SQL. See <a href="https://github.com/nickvd7/flowd/blob/main/docs/privacy.md">privacy docs</a>.</p>
+      <p><code>flowctl status</code>, <code>suggestions --explain</code>, <code>runs show</code>, and plain SQL. See <a href="https://github.com/nickvd7/flowd/blob/main/docs/privacy.md">privacy docs</a>.</p>
     </div>
   </div>
 </section>
@@ -302,21 +511,27 @@ footer .heart { color: var(--red); }
 
 <section id="install">
   <h2>install</h2>
-  <p class="section-sub">v0.2 installs from source. You need a stable Rust toolchain.</p>
-  <pre class="code"><span class="cm"># clone &amp; install the CLI + daemon</span>
+  <p class="section-sub">v0.3 installs from source (or Homebrew HEAD). You need a stable Rust toolchain.</p>
+  <pre class="code"><span class="cm"># clone &amp; install</span>
 git clone https://github.com/nickvd7/flowd &amp;&amp; cd flowd
-cargo install --path crates/flow-cli
-cargo install --path crates/flow-daemon
+./scripts/install.sh
+<span class="cm"># or: cargo install --path crates/flow-cli &amp;&amp; cargo install --path crates/flow-daemon</span>
 
-<span class="cm"># first-run setup</span>
+<span class="cm"># first-run setup + daemon</span>
 flowctl setup --watch ~/Downloads --watch ~/Desktop
-flow-daemon
+flowctl daemon start
+flowctl daemon status
 
 <span class="cm"># core loop</span>
 flowctl suggestions
 flowctl approve 1
 flowctl dry-run 1
-flowctl run 1</pre>
+flowctl run 1
+flowctl runs show 2
+flowctl undo 2
+
+<span class="cm"># optional Homebrew HEAD</span>
+<span class="kw">brew install --HEAD --formula Formula/flowd.rb</span></pre>
 </section>
 
 <section id="faq">
@@ -330,6 +545,10 @@ flowctl run 1</pre>
     <details>
       <summary>What does flowd actually record?</summary>
       <p>Filesystem events in folders you configure. Optional clipboard metadata, browser-download bridge records, and terminal-history bridge lines — all off by default except folder watching.</p>
+    </details>
+    <details>
+      <summary>Can automations escape watched folders?</summary>
+      <p>Not when the allowlist is enforced (default). Destinations must stay under <code>observed_folders</code> or explicit <code>execution_allowed_roots</code>. Symlink escapes are rejected.</p>
     </details>
     <details>
       <summary>How long until the first suggestion?</summary>
@@ -376,11 +595,33 @@ flowctl run 1</pre>
 </section>
 
 <footer>
-  <div>flowd · MIT · built with <span class="heart">♥</span> and rust</div>
+  <div>flowd · MIT · v0.3 toward 1.0 · built with <span class="heart">♥</span> and rust</div>
   <div><a href="https://github.com/nickvd7/flowd">github.com/nickvd7/flowd</a></div>
 </footer>
 
 </div>
+
+<div class="nav-backdrop" id="nav-backdrop" hidden></div>
+<nav class="nav-drawer" id="nav-drawer" aria-hidden="true" aria-label="Site">
+  <div class="nav-drawer-inner">
+    <div class="nav-drawer-head">
+      <div class="nav-drawer-title">menu</div>
+      <button class="menu-close" id="menu-close" type="button" aria-label="Close menu">
+        close <span aria-hidden="true">✕</span>
+      </button>
+    </div>
+    <div class="nav-links">
+      <a href="#how">how</a>
+      <a href="#whats-new">what's new</a>
+      <a href="#privacy">privacy</a>
+      <a href="#compare">compare</a>
+      <a href="#install">install</a>
+      <a href="#faq">faq</a>
+      <a href="#contact">contact</a>
+      <a href="https://github.com/nickvd7/flowd">github</a>
+    </div>
+  </div>
+</nav>
 
 <script>
 const script = [
@@ -396,11 +637,16 @@ const script = [
   { t: "out", text: "" },
   { t: "cmd", text: "flowctl dry-run 1" },
   { t: "out", text: "" },
-  { t: "out", text: "<span class='ok'>✓</span> dry-run ok — 2 files would move, 0 conflicts" },
+  { t: "out", text: "<span class='ok'>✓</span> dry-run ok — 2 files would move · recorded as run <span class='id'>1</span>" },
   { t: "out", text: "" },
   { t: "cmd", text: "flowctl run 1" },
   { t: "out", text: "" },
-  { t: "out", text: "<span class='ok'>✓</span> moved 2 invoices · undo with <span class='hl'>flowctl undo &lt;run_id&gt;</span>" },
+  { t: "out", text: "<span class='ok'>✓</span> moved 2 invoices · Run recorded as id=<span class='id'>2</span>" },
+  { t: "out", text: "" },
+  { t: "cmd", text: "flowctl runs show 2" },
+  { t: "out", text: "" },
+  { t: "out", text: "run: 2 · result: completed · operations (2)" },
+  { t: "out", text: "<span class='out'>  - rename / move under allowlisted roots</span>" },
 ];
 
 const term = document.getElementById("term");
@@ -444,6 +690,36 @@ io.observe(term);
 const form = document.getElementById("contact-form");
 const status = document.getElementById("form-status");
 const submitBtn = document.getElementById("cf-submit");
+const menuToggle = document.getElementById("menu-toggle");
+const menuClose = document.getElementById("menu-close");
+const navDrawer = document.getElementById("nav-drawer");
+const navBackdrop = document.getElementById("nav-backdrop");
+
+function setMenuOpen(open) {
+  document.body.classList.toggle("menu-open", open);
+  navDrawer.classList.toggle("open", open);
+  navBackdrop.classList.toggle("open", open);
+  navDrawer.setAttribute("aria-hidden", open ? "false" : "true");
+  navBackdrop.hidden = !open;
+  menuToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  menuToggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+}
+
+function closeMenu() {
+  setMenuOpen(false);
+}
+
+menuToggle.addEventListener("click", () => {
+  setMenuOpen(!navDrawer.classList.contains("open"));
+});
+menuClose.addEventListener("click", closeMenu);
+navBackdrop.addEventListener("click", closeMenu);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeMenu();
+});
+navDrawer.querySelectorAll("a").forEach((link) => {
+  link.addEventListener("click", closeMenu);
+});
 
 function showStatus(msg, isError) {
   status.textContent = msg;
