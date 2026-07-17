@@ -2,7 +2,27 @@
 
 `flowd` is ready for real usage, not just demos. The next step is to run it in normal workflows for 1 to 2 weeks and capture where the MVP feels useful, noisy, confusing, or unsafe.
 
-This guide keeps the process lightweight:
+## Simulated dogfood (CI / developers)
+
+Before or alongside human dogfooding, run the deterministic replay harness:
+
+```bash
+cargo test -p flow-analysis --test simulated_dogfood
+cargo test -p flow-analysis --test demo_scenarios
+cargo test -p flow-core paths
+```
+
+That suite checks:
+
+- one pattern and one suggestion per canonical demo scenario (anti-noise)
+- multi-scenario isolation (no cross-contamination)
+- approve → dry-run → run → undo on rewritten filesystem paths
+- allowlist fail-closed behavior for destinations outside configured roots
+
+It does **not** replace sustained real-world use, but it is the automated quality
+bar used on the road to 1.0.
+
+This guide keeps the human process lightweight:
 
 - use `flowd` during real work
 - check suggestions regularly

@@ -11,11 +11,11 @@
       "arg_count": 2,
       "succeeded": true,
       "redacted_command": "mv <path> <path>",
-      "path": "/demo/workspace/inbox/project-brief-reviewed-01.md",
+      "path": "/demo/workspace/inbox/project-brief-01-reviewed.md",
       "from_path": "/demo/workspace/inbox/project-brief-01.md",
       "paths": [
         "/demo/workspace/inbox/project-brief-01.md",
-        "/demo/workspace/inbox/project-brief-reviewed-01.md"
+        "/demo/workspace/inbox/project-brief-01-reviewed.md"
       ],
       "path_count": 2,
       "destructive": false
@@ -33,11 +33,11 @@
       "arg_count": 2,
       "succeeded": true,
       "redacted_command": "mv <path> <path>",
-      "path": "/demo/workspace/archive/project-brief-reviewed-01.md",
-      "from_path": "/demo/workspace/inbox/project-brief-reviewed-01.md",
+      "path": "/demo/workspace/archive/project-brief-01-reviewed.md",
+      "from_path": "/demo/workspace/inbox/project-brief-01-reviewed.md",
       "paths": [
-        "/demo/workspace/inbox/project-brief-reviewed-01.md",
-        "/demo/workspace/archive/project-brief-reviewed-01.md"
+        "/demo/workspace/inbox/project-brief-01-reviewed.md",
+        "/demo/workspace/archive/project-brief-01-reviewed.md"
       ],
       "path_count": 2,
       "destructive": false
@@ -55,11 +55,11 @@
       "arg_count": 2,
       "succeeded": true,
       "redacted_command": "mv <path> <path>",
-      "path": "/demo/workspace/inbox/project-brief-reviewed-02.md",
+      "path": "/demo/workspace/inbox/project-brief-02-reviewed.md",
       "from_path": "/demo/workspace/inbox/project-brief-02.md",
       "paths": [
         "/demo/workspace/inbox/project-brief-02.md",
-        "/demo/workspace/inbox/project-brief-reviewed-02.md"
+        "/demo/workspace/inbox/project-brief-02-reviewed.md"
       ],
       "path_count": 2,
       "destructive": false
@@ -77,11 +77,11 @@
       "arg_count": 2,
       "succeeded": true,
       "redacted_command": "mv <path> <path>",
-      "path": "/demo/workspace/archive/project-brief-reviewed-02.md",
-      "from_path": "/demo/workspace/inbox/project-brief-reviewed-02.md",
+      "path": "/demo/workspace/archive/project-brief-02-reviewed.md",
+      "from_path": "/demo/workspace/inbox/project-brief-02-reviewed.md",
       "paths": [
-        "/demo/workspace/inbox/project-brief-reviewed-02.md",
-        "/demo/workspace/archive/project-brief-reviewed-02.md"
+        "/demo/workspace/inbox/project-brief-02-reviewed.md",
+        "/demo/workspace/archive/project-brief-02-reviewed.md"
       ],
       "path_count": 2,
       "destructive": false

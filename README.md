@@ -73,6 +73,14 @@ For more realistic cases, see [Example Workflows](docs/example-workflows.md). To
 
 ## Installation
 
+### Supported platforms
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| Linux (x86_64) | Primary | systemd user unit via `flowctl daemon install-service` |
+| macOS | Supported | launchd via `flowctl daemon install-service`; Homebrew formula under `Formula/flowd.rb` |
+| Windows | Not supported for 1.0 | filesystem adapters and service install are Unix-first |
+
 ### Install from source
 
 The `v0.3` pre-release is currently documented for source installs from this repository. You need a stable Rust toolchain.
@@ -83,6 +91,14 @@ cargo install --path crates/flow-daemon
 # or:
 ./scripts/install.sh
 ```
+
+### Homebrew (HEAD)
+
+```bash
+brew install --HEAD --formula Formula/flowd.rb
+```
+
+See [Upgrade to 1.0](docs/upgrade-to-v1.md) when moving from 0.2/0.3 installs.
 
 This installs:
 

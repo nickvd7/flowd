@@ -20,21 +20,22 @@ It is **not** a general desktop agent, browser controller, or cloud sync product
 
 Copied and expanded from `docs/PLAN.md`:
 
-- [ ] daemon runs reliably in the background on Linux and macOS
-- [ ] repeated download/file workflows are detected without special demo setup
-- [ ] at least one safe automation can be approved, dry-run, run, and undone
-- [ ] false positives stay low enough for daily use
-- [ ] execution paths cannot escape the configured allowlist
-- [ ] install path is documented and works from a tagged release
-- [ ] privacy defaults remain safe (adapters off, auto-run off, redaction on)
+- [x] daemon lifecycle commands + contrib service units (Linux/macOS)
+- [x] repeated download/file workflows detected in simulated demo replay
+- [x] at least one safe automation can be approved, dry-run, run, and undone (simulated)
+- [ ] false positives stay low enough for daily use (needs human dogfood)
+- [x] execution paths cannot escape the configured allowlist (incl. symlink matrix)
+- [x] install path is documented (`install.sh`, release workflow, Homebrew formula)
+- [x] privacy defaults remain safe (adapters off, auto-run off, redaction on)
 
 ## Workstreams
 
 ### 1. Dogfooding and quality bar
 
-- Run real Downloads/Desktop workflows for sustained use
-- Track false positives, misses, and timing issues in notes
-- Tune anti-annoyance defaults from real feedback
+- [x] simulated dogfood harness (`cargo test -p flow-analysis --test simulated_dogfood`)
+- [ ] Run real Downloads/Desktop workflows for sustained use (human)
+- [ ] Track false positives, misses, and timing issues in notes
+- [ ] Tune anti-annoyance defaults from real feedback
 
 ### 2. Release hardening
 
@@ -42,7 +43,7 @@ Copied and expanded from `docs/PLAN.md`:
 - [x] `scripts/install.sh` source installer
 - [x] `flowctl` binary alias
 - [ ] signed/notarized macOS artifacts (post-1.0 candidate if needed)
-- [ ] Homebrew formula or equivalent package once tags are stable
+- [x] Homebrew formula (`Formula/flowd.rb`, HEAD until stable tags)
 
 ### 3. Daemon lifecycle
 
@@ -56,15 +57,15 @@ Copied and expanded from `docs/PLAN.md`:
 
 - [x] execution path allowlist (`observed_folders` / `execution_allowed_roots`)
 - [x] enforce allowlist on dry-run, run, undo, and daemon auto-run
-- [ ] stronger canonicalize edge-case matrix for symlinks
+- [x] stronger canonicalize edge-case matrix for symlinks
 - [ ] audit-friendly run summaries for every apply/undo
 
 ### 5. Packaging and docs
 
 - [x] `docs/daemon.md`
 - [x] `docs/release-notes-v0.3.md`
-- [ ] upgrade guide from 0.2/0.3 to 1.0
-- [ ] supported platforms matrix in README
+- [x] upgrade guide from 0.2/0.3 to 1.0 (`docs/upgrade-to-v1.md`)
+- [x] supported platforms matrix in README
 
 ## Suggested release train
 

@@ -515,19 +515,48 @@ pub fn enable_automation(conn: &Connection, automation_id: i64) -> Result<()> {
     Ok(())
 }
 
+fn is_source_file_event(action_type: &ActionType) -> bool {
+    matches!(
+        action_type,
+        ActionType::CreateFile | ActionType::DownloadFile
+    )
+}
+
+fn source_path_from_events(events: &[NormalizedEvent]) -> Result<(&NormalizedEvent, &str)> {
+    if let Some(event) = events
+        .iter()
+        .find(|event| is_source_file_event(&event.action_type))
+    {
+        let path = event
+            .target
+            .as_deref()
+            .ok_or_else(|| anyhow!("source event path is missing"))?;
+        return Ok((event, path));
+    }
+
+    // Terminal-driven rename→move workflows often have no create/download event.
+    // Use the rename source path as the trigger origin in that case.
+    if let Some(event) = events
+        .iter()
+        .find(|event| event.action_type == ActionType::RenameFile)
+    {
+        let path = event
+            .metadata
+            .get("from_path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow!("rename source path is missing"))?;
+        return Ok((event, path));
+    }
+
+    bail!("create, download, or rename event is required for approval")
+}
+
 fn compile_automation_spec(summary: &str, events: &[NormalizedEvent]) -> Result<AutomationSpec> {
     if events.is_empty() {
         bail!("no example events available");
     }
 
-    let create_event = events
-        .iter()
-        .find(|event| event.action_type == ActionType::CreateFile)
-        .ok_or_else(|| anyhow!("create event is required for approval"))?;
-    let source_path = create_event
-        .target
-        .as_deref()
-        .ok_or_else(|| anyhow!("create event path is missing"))?;
+    let (source_event, source_path) = source_path_from_events(events)?;
     let source_dir = Path::new(source_path)
         .parent()
         .ok_or_else(|| anyhow!("source directory is missing"))?;
@@ -535,7 +564,7 @@ fn compile_automation_spec(summary: &str, events: &[NormalizedEvent]) -> Result<
         .extension()
         .and_then(|value| value.to_str())
         .map(|value| value.to_string());
-    let name_contains = create_event
+    let name_contains = source_event
         .metadata
         .get("file_group")
         .and_then(|value| value.as_str())
@@ -853,7 +882,7 @@ fn preview_examples_from_report(report: &ExecutionReport) -> Vec<PreviewExample>
 
 fn preview_examples_from_events(events: &[NormalizedEvent]) -> Vec<PreviewExample> {
     let Some(before) = events.iter().find_map(|event| {
-        (event.action_type == ActionType::CreateFile)
+        is_source_file_event(&event.action_type)
             .then_some(event.target.as_deref())
             .flatten()
     }) else {

@@ -288,6 +288,7 @@ dependencies = [
  "flow-adapters",
  "flow-core",
  "flow-db",
+ "flow-exec",
  "flow-patterns",
  "flowd-intelligence",
  "rusqlite",

@@ -22,4 +22,5 @@ ureq.workspace = true
 
 [dev-dependencies]
 flow-adapters = { path = "../flow-adapters" }
+flow-exec = { path = "../flow-exec" }
 tempfile.workspace = true

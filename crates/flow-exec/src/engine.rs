@@ -494,6 +494,31 @@ mod tests {
         assert!(error.contains("allowlist"), "{error}");
     }
 
+    #[test]
+    fn plan_rejects_symlink_destination_escape() {
+        let base = tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let source = workspace.join("inbox");
+        let outside = base.path().join("outside");
+        let portal = workspace.join("portal");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &portal).unwrap();
+        #[cfg(not(unix))]
+        {
+            let _ = (&outside, &portal);
+            return;
+        }
+        fs::write(source.join("invoice-1008.pdf"), "invoice").unwrap();
+        let spec = invoice_spec(&source, &portal);
+        // Workspace is allowlisted, but the destination symlink resolves outside it.
+        let allowlist = PathAllowlist::from_roots([workspace]);
+
+        let error = plan(&spec, &allowlist).unwrap_err().to_string();
+        assert!(error.contains("allowlist"), "{error}");
+    }
+
     /// Undo tests validate that inverse plans are derived from stored
     /// execution metadata, run in reverse order, and stop before mutation when
     /// the current filesystem no longer matches the recorded run state.

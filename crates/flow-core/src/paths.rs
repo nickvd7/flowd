@@ -6,6 +6,10 @@ use std::path::{Component, Path, PathBuf};
 /// When unrestricted (tests only), any path is accepted. Production configs
 /// should always use concrete roots derived from `observed_folders` and/or
 /// `execution_allowed_roots`.
+///
+/// Symlinks are resolved with `canonicalize` whenever the path (or its nearest
+/// existing parent) exists, so a link that points outside the allowlist cannot
+/// be used as an escape hatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathAllowlist {
     roots: Option<Vec<PathBuf>>,
@@ -19,7 +23,7 @@ impl PathAllowlist {
     pub fn from_roots(roots: impl IntoIterator<Item = PathBuf>) -> Self {
         let roots: Vec<_> = roots
             .into_iter()
-            .map(|root| normalize_lexical(&root))
+            .map(|root| resolve_root(&root))
             .filter(|root| !root.as_os_str().is_empty())
             .collect();
         Self {
@@ -50,7 +54,9 @@ impl PathAllowlist {
             return false;
         }
         let candidate = resolve_for_allowlist(path);
-        roots.iter().any(|root| path_is_within(&candidate, root))
+        roots
+            .iter()
+            .any(|root| path_is_within(&candidate, &resolve_root(root)))
     }
 
     pub fn ensure_allows(&self, path: &Path) -> Result<(), String> {
@@ -65,17 +71,44 @@ impl PathAllowlist {
     }
 }
 
+fn resolve_root(root: &Path) -> PathBuf {
+    if let Ok(canonical) = root.canonicalize() {
+        return canonical;
+    }
+    normalize_lexical(root)
+}
+
 fn resolve_for_allowlist(path: &Path) -> PathBuf {
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
     }
-    if let Some(parent) = path.parent() {
-        if let Ok(canonical_parent) = parent.canonicalize() {
-            if let Some(name) = path.file_name() {
-                return canonical_parent.join(name);
+
+    // Walk up to the nearest existing ancestor so symlink parents that point
+    // outside the allowlist are still detected for not-yet-created children.
+    let mut current = normalize_lexical(path);
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            let mut resolved = canonical;
+            for part in suffix.iter().rev() {
+                resolved.push(part);
             }
+            return resolved;
+        }
+        match current.file_name() {
+            Some(name) => {
+                suffix.push(name.to_os_string());
+                match current.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => {
+                        current = parent.to_path_buf();
+                    }
+                    _ => break,
+                }
+            }
+            None => break,
         }
     }
+
     normalize_lexical(path)
 }
 
@@ -116,6 +149,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
     #[test]
@@ -136,6 +170,94 @@ mod tests {
         let allowlist = PathAllowlist::from_roots([downloads]);
         let escape = dir.path().join("Downloads/../Secrets/file.pdf");
         assert!(!allowlist.allows(&escape));
+    }
+
+    #[test]
+    fn rejects_string_prefix_lookalike_roots() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let lookalike = dir.path().join("allowed_evil");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&lookalike).unwrap();
+        let allowlist = PathAllowlist::from_roots([allowed]);
+        assert!(!allowlist.allows(&lookalike.join("secret.pdf")));
+    }
+
+    #[test]
+    fn rejects_symlink_file_escape() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.pdf");
+        std::fs::write(&secret, "secret").unwrap();
+        let link = allowed.join("escape.pdf");
+        symlink(&secret, &link).unwrap();
+
+        let allowlist = PathAllowlist::from_roots([allowed]);
+        assert!(!allowlist.allows(&link));
+    }
+
+    #[test]
+    fn rejects_symlink_directory_escape_for_new_child() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link_dir = allowed.join("portal");
+        symlink(&outside, &link_dir).unwrap();
+
+        let allowlist = PathAllowlist::from_roots([allowed]);
+        assert!(!allowlist.allows(&link_dir.join("new-file.pdf")));
+    }
+
+    #[test]
+    fn allows_symlink_that_stays_inside_root() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let nested = allowed.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let target = nested.join("invoice.pdf");
+        std::fs::write(&target, "invoice").unwrap();
+        let link = allowed.join("alias.pdf");
+        symlink(&target, &link).unwrap();
+
+        let allowlist = PathAllowlist::from_roots([allowed]);
+        assert!(allowlist.allows(&link));
+    }
+
+    #[test]
+    fn allows_when_root_itself_is_a_symlink() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real-root");
+        let link_root = dir.path().join("link-root");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &link_root).unwrap();
+
+        let allowlist = PathAllowlist::from_roots([link_root]);
+        assert!(allowlist.allows(&real.join("file.pdf")));
+    }
+
+    #[test]
+    fn rejects_nested_symlink_chain_escape() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let mid = dir.path().join("mid");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&mid).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.pdf"), "secret").unwrap();
+
+        let hop = mid.join("hop");
+        symlink(&outside, &hop).unwrap();
+        let portal = allowed.join("portal");
+        symlink(&hop, &portal).unwrap();
+
+        let allowlist = PathAllowlist::from_roots([allowed]);
+        assert!(!allowlist.allows(&portal.join("secret.pdf")));
     }
 
     #[test]
