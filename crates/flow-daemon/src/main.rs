@@ -14,7 +14,7 @@ use flow_analysis::catch_up_analysis;
 use flow_analysis::{catch_up_analysis_with_intelligence, PrivateIntelligenceClient};
 use flow_core::config::{expand_home, Config};
 use flow_core::events::RawEvent;
-use flow_core::PathAllowlist;
+use flow_core::{resolve_intelligence_entitlement, PathAllowlist};
 use flow_db::open_database as open_sqlite_database;
 use flow_db::repo::list_automations;
 use flow_exec::{execute_automation, execute_automation_for_path};
@@ -219,7 +219,7 @@ fn run() -> Result<()> {
 
 fn refresh_daemon_analysis(conn: &mut Connection, config: &Config) -> Result<()> {
     #[cfg(feature = "intelligence")]
-    if config.intelligence_enabled {
+    if config.intelligence_enabled && resolve_intelligence_entitlement().allows_intelligence() {
         return catch_up_analysis_with_intelligence(
             conn,
             config.session_inactivity_secs,

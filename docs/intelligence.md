@@ -48,14 +48,54 @@ Without it:
 
 **Private does not mean cloud.** It means a closed decision policy, evaluated locally against your SQLite history.
 
-## Dual gate
+## Dual gate (+ local entitlement)
 
-Both must be on:
+All of the following must pass:
 
 1. Build with Cargo feature `intelligence`
 2. Set `intelligence_enabled = true` in config
+3. Present a valid local entitlement **or** enable dev mode
 
-If either gate is off, suggestions use the open-core baseline and `NoopIntelligenceClient`.
+If any gate fails, suggestions use the open-core baseline and `NoopIntelligenceClient`.
+
+### Local entitlement (skeleton)
+
+License file (default path):
+
+```text
+~/.config/flowd/intelligence.license.toml
+```
+
+Override path with `FLOWD_INTELLIGENCE_LICENSE`. Example:
+
+```bash
+cp examples/intelligence.license.toml ~/.config/flowd/intelligence.license.toml
+```
+
+```toml
+schema_version = 1
+tier = "eval"          # eval | pro | team | dev
+issued_to = "you@example.com"
+expires_at = "2099-12-31T23:59:59Z"
+token = "local-unsigned-v1:replace-me"
+```
+
+Token verification is **unsigned for now** (file shape + expiry only). Signed
+tokens can land later without changing the public path.
+
+Developer override (sibling checkout / CI local work):
+
+```bash
+export FLOWD_INTELLIGENCE_DEV=1
+```
+
+Check status:
+
+```bash
+flowctl doctor
+# intelligence layer: connected · licensed (eval), … 
+# or: blocked · entitlement: missing license (…)
+```
 
 ## Local build
 
@@ -111,6 +151,36 @@ pending list. Local LLM labeling is localhost-only metadata for
 Team policy packs can force intelligence off on shared machines — see
 [Team Policy](./team-policy.md).
 
+## Explain reasons
+
+When intelligence hides or delays a suggestion, `flowctl suggestions --explain`
+and `flowctl suggestions explain <id>` show stable codes plus a short message:
+
+| Code | Meaning |
+| --- | --- |
+| `timing.too_new` | Pattern is still too new |
+| `timing.too_weak` | Signal too weak to show yet |
+| `timing.low_confidence` | Below confidence threshold |
+| `suppression.recently_shown` | Shown recently |
+| `suppression.cooldown_after_reject` | Reject cooldown |
+| `suppression.cooldown_after_snooze` | Snooze cooldown |
+| `suppression.too_many_dismissals` | Dismissed too often |
+| `suppression.low_score` | Score not credible enough |
+| `suppression.low_freshness` | Workflow too stale |
+
+Factors may also include `delay_until_ts` / `suppress_until_ts`.
+
+## Pricing tiers (product)
+
+| Tier | Includes |
+| --- | --- |
+| **Open core** | MIT engine: observe, baseline suggestions, approve → dry-run → run → undo |
+| **Eval** | Time-boxed Private Intelligence for evaluation (`tier = "eval"`) |
+| **Pro** | Individual Private Intelligence: ranking, timing, suppression, explain codes |
+| **Team** | Pro + shared policy packs / commercial support lane |
+
+Commercial access and partner questions: [flowd.net/#contact](https://flowd.net/#contact).
+
 ## Product messaging (canonical)
 
 Use these lines in homepage, README, and release notes:
@@ -118,6 +188,7 @@ Use these lines in homepage, README, and release notes:
 - **Engine:** “flowd watches repeated local file work and suggests automations you approve.”
 - **Intelligence:** “Private Intelligence decides which suggestions surface, when, and how they’re worded — so the CLI stays quiet and useful.”
 - **Boundary:** “Turn intelligence off and the engine still works. Decision quality is the paid layer; capture and execution stay open and local.”
+- **Entitlement:** “Open-core is free. Private Intelligence unlocks with a local license file — still on-device.”
 
 ## Support
 

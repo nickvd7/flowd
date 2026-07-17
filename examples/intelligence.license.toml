@@ -1,0 +1,13 @@
+# Private Intelligence local entitlement (skeleton).
+# Copy to: ~/.config/flowd/intelligence.license.toml
+#
+# For local development without a file:
+#   export FLOWD_INTELLIGENCE_DEV=1
+#
+# Cryptographic token verification is intentionally not enforced yet.
+
+schema_version = 1
+tier = "eval" # eval | pro | team | dev
+issued_to = "you@example.com"
+expires_at = "2099-12-31T23:59:59Z"
+token = "local-unsigned-v1:replace-me"

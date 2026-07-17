@@ -527,7 +527,7 @@ footer .heart { color: var(--red); }
   <div class="stack" style="margin-top:22px">
     <div class="stack-item">
       <h3>what it changes in the CLI</h3>
-      <p>With intelligence on, <code>flowctl suggestions</code> shows fewer low-value items, better order, and explainable delay/suppress reasons via <code>suggestions --explain</code>.</p>
+      <p>With intelligence on, <code>flowctl suggestions</code> shows fewer low-value items, better order, and stable reason codes via <code>suggestions --explain</code> (e.g. <code>timing.too_new</code>, <code>suppression.cooldown_after_reject</code>).</p>
     </div>
     <div class="stack-item">
       <h3>what it never does</h3>
@@ -535,9 +535,57 @@ footer .heart { color: var(--red); }
     </div>
     <div class="stack-item">
       <h3>how to enable</h3>
-      <p>Build with <code>--features intelligence</code> (sibling <code>flowd-intelligence</code> checkout) and set <code>intelligence_enabled = true</code>. Docs: <a href="https://github.com/nickvd7/flowd/blob/main/docs/intelligence.md">Private Intelligence</a>.</p>
+      <p>Build with <code>--features intelligence</code>, set <code>intelligence_enabled = true</code>, and install a local license at <code>~/.config/flowd/intelligence.license.toml</code> (or <code>FLOWD_INTELLIGENCE_DEV=1</code> for development). Docs: <a href="https://github.com/nickvd7/flowd/blob/main/docs/intelligence.md">Private Intelligence</a>.</p>
     </div>
   </div>
+</section>
+
+<section id="pricing">
+  <h2>pricing</h2>
+  <p class="section-sub">Open-core stays free. Private Intelligence is the product layer — still local, unlocked with a license file.</p>
+  <div class="split" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+    <div class="split-card">
+      <div class="kicker">open core · mit</div>
+      <h3>Free</h3>
+      <p>Observe, baseline suggestions, approve → dry-run → run → undo, path allowlist, audit trail.</p>
+      <ul>
+        <li>No account</li>
+        <li>No license file</li>
+        <li><a href="#install">Install</a></li>
+      </ul>
+    </div>
+    <div class="split-card">
+      <div class="kicker">eval · time-boxed</div>
+      <h3>Eval</h3>
+      <p>Try Private Intelligence on your machine with an evaluation license.</p>
+      <ul>
+        <li>Ranking / timing / suppress</li>
+        <li>Explain reason codes</li>
+        <li><a href="#contact">Request eval</a></li>
+      </ul>
+    </div>
+    <div class="split-card accent">
+      <div class="kicker">pro · individual</div>
+      <h3>Pro</h3>
+      <p>Quieter CLI for daily use — decision quality as the product.</p>
+      <ul>
+        <li>Local license file</li>
+        <li>Personalization from feedback</li>
+        <li><a href="#contact">Get Pro</a></li>
+      </ul>
+    </div>
+    <div class="split-card accent">
+      <div class="kicker">team · orgs</div>
+      <h3>Team</h3>
+      <p>Pro plus shared policy packs and a commercial support lane.</p>
+      <ul>
+        <li>Force-safe defaults</li>
+        <li>Partner / paid support</li>
+        <li><a href="#contact">Talk to us</a></li>
+      </ul>
+    </div>
+  </div>
+  <p class="model-line" style="margin-top:18px"><strong>Prices:</strong> contact for current Eval / Pro / Team terms — we keep numbers out of the OSS tree until tiers stabilize. License check is local (`flowctl doctor`).</p>
 </section>
 
 <section id="how">
@@ -626,7 +674,9 @@ flowctl runs show 2
 
 <span class="cm"># Private Intelligence (sibling flowd-intelligence checkout)</span>
 cargo install --path crates/flow-cli --features intelligence --force
-<span class="cm"># then: intelligence_enabled = true</span>
+<span class="cm"># config: intelligence_enabled = true</span>
+<span class="cm"># license: ~/.config/flowd/intelligence.license.toml  (or FLOWD_INTELLIGENCE_DEV=1)</span>
+flowctl doctor
 flowctl suggestions --explain
 
 <span class="cm"># optional Homebrew HEAD (open-core)</span>
@@ -745,6 +795,7 @@ flowctl suggestions --explain
     </div>
     <div class="nav-links">
       <a href="#intelligence">intelligence</a>
+      <a href="#pricing">pricing</a>
       <a href="#how">how</a>
       <a href="#whats-new">what's new</a>
       <a href="#privacy">privacy</a>

@@ -21,7 +21,7 @@ use flow_analysis::PrivateIntelligenceClient;
 use flow_core::config::{
     expand_home, preferred_setup_config_path, Config, ConfigSource, LoadedConfig,
 };
-use flow_core::PathAllowlist;
+use flow_core::{resolve_intelligence_entitlement, PathAllowlist};
 use flow_core::events::{ActionType, NormalizedEvent};
 use flow_analysis::local_llm::{label_workflow, LocalLlmLabelRequest};
 use flow_db::{
@@ -1107,7 +1107,10 @@ fn render_config_command(
 fn resolve_intelligence_client(config: &Config) -> Box<dyn IntelligenceClient> {
     #[cfg(feature = "intelligence")]
     if config.intelligence_enabled {
-        return Box::new(PrivateIntelligenceClient::from_open_core_config(config));
+        let entitlement = resolve_intelligence_entitlement();
+        if entitlement.allows_intelligence() {
+            return Box::new(PrivateIntelligenceClient::from_open_core_config(config));
+        }
     }
     let _ = config;
     Box::new(NoopIntelligenceClient)
@@ -1339,20 +1342,35 @@ fn doctor_report(context: &RuntimeContext) -> DoctorReport {
         "configured".to_string()
     };
 
-    let intelligence_layer = if config.intelligence_enabled {
+    let entitlement = resolve_intelligence_entitlement();
+    let intelligence_layer = if !config.intelligence_enabled {
+        format!("disabled in config · entitlement: {}", entitlement.summary())
+    } else {
         #[cfg(feature = "intelligence")]
         {
-            match PrivateIntelligenceClient::default().evaluate(&default_intelligence_request()) {
-                Ok(_) => "connected".to_string(),
-                Err(error) => format!("unavailable ({error})"),
+            if !entitlement.allows_intelligence() {
+                format!(
+                    "blocked · entitlement: {} · set FLOWD_INTELLIGENCE_DEV=1 or install ~/.config/flowd/intelligence.license.toml",
+                    entitlement.summary()
+                )
+            } else {
+                match PrivateIntelligenceClient::default().evaluate(&default_intelligence_request())
+                {
+                    Ok(_) => format!("connected · {}", entitlement.summary()),
+                    Err(error) => format!(
+                        "unavailable ({error}) · entitlement: {}",
+                        entitlement.summary()
+                    ),
+                }
             }
         }
         #[cfg(not(feature = "intelligence"))]
         {
-            "enabled in config, but binary built without --features intelligence".to_string()
+            format!(
+                "enabled in config, but binary built without --features intelligence · entitlement: {}",
+                entitlement.summary()
+            )
         }
-    } else {
-        "disabled".to_string()
     };
 
     match open_doctor_database(context) {

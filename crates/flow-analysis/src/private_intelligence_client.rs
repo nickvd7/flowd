@@ -262,12 +262,13 @@ fn map_shown_suggestion(shown: DisplayedSuggestion) -> IntelligenceDisplayDecisi
             shown.final_score,
             None,
             None,
+            Vec::new(),
         )),
     }
 }
 
 fn map_hidden_suggestion(hidden: HiddenSuggestion) -> IntelligenceDisplayDecision {
-    let (action, timing_reason, suppression_reason) = classify_hidden(&hidden);
+    let (action, timing_reason, suppression_reason, extra_factors) = classify_hidden(&hidden);
     IntelligenceDisplayDecision {
         pattern_signature: hidden.suggestion_id.clone(),
         action,
@@ -280,6 +281,7 @@ fn map_hidden_suggestion(hidden: HiddenSuggestion) -> IntelligenceDisplayDecisio
             hidden.final_score,
             timing_reason,
             suppression_reason,
+            extra_factors,
         )),
     }
 }
@@ -290,25 +292,40 @@ fn classify_hidden(
     SuggestionDecisionAction,
     Option<String>,
     Option<String>,
+    Vec<IntelligenceRankingFactor>,
 ) {
     match hidden.suppression {
         SuppressionDecision::NotSuppressed => match hidden.timing {
             TimingDecision::ShowNow => (
                 SuggestionDecisionAction::Suppress,
                 None,
-                Some("hidden_without_explicit_reason".to_string()),
+                Some("suppression.unknown: hidden without an explicit timing/suppression reason".to_string()),
+                Vec::new(),
             ),
-            TimingDecision::Delay { reason, .. } => (
+            TimingDecision::Delay { reason, until_ts } => (
                 SuggestionDecisionAction::Delay,
-                Some(format!("{reason:?}")),
+                Some(reason.explain()),
                 None,
+                vec![IntelligenceRankingFactor {
+                    label: "delay_until_ts".to_string(),
+                    detail: until_ts.to_string(),
+                }],
             ),
         },
-        SuppressionDecision::SuppressUntil { reason, .. }
-        | SuppressionDecision::SuppressIndefinitely { reason } => (
+        SuppressionDecision::SuppressUntil { reason, until_ts } => (
             SuggestionDecisionAction::Suppress,
             None,
-            Some(format!("{reason:?}")),
+            Some(reason.explain()),
+            vec![IntelligenceRankingFactor {
+                label: "suppress_until_ts".to_string(),
+                detail: until_ts.to_string(),
+            }],
+        ),
+        SuppressionDecision::SuppressIndefinitely { reason } => (
+            SuggestionDecisionAction::Suppress,
+            None,
+            Some(reason.explain()),
+            Vec::new(),
         ),
     }
 }
@@ -319,10 +336,34 @@ fn map_explanation(
     final_score: f32,
     timing_reason: Option<String>,
     suppression_reason: Option<String>,
+    extra_factors: Vec<IntelligenceRankingFactor>,
 ) -> IntelligenceExplanation {
+    let decision_note = timing_reason
+        .as_deref()
+        .or(suppression_reason.as_deref())
+        .unwrap_or("eligible to show");
+    let mut ranking_factors = vec![
+        IntelligenceRankingFactor {
+            label: "base_rank".to_string(),
+            detail: explanation.base_rank.to_string(),
+        },
+        IntelligenceRankingFactor {
+            label: "cluster_id".to_string(),
+            detail: explanation.cluster_assignment.cluster_id.clone(),
+        },
+        IntelligenceRankingFactor {
+            label: "preference_timing_delta".to_string(),
+            detail: format!(
+                "{:.3}",
+                explanation.preference_adjustment.timing_confidence_delta
+            ),
+        },
+    ];
+    ranking_factors.extend(extra_factors);
+
     IntelligenceExplanation {
         summary: Some(format!(
-            "rank {final_rank}; score {final_score:.3}; confidence {:.3}",
+            "rank {final_rank}; score {final_score:.3}; confidence {:.3}; {decision_note}",
             explanation.final_confidence
         )),
         score_breakdown: vec![
@@ -345,23 +386,7 @@ fn map_explanation(
         ],
         timing_reason,
         suppression_reason,
-        ranking_factors: vec![
-            IntelligenceRankingFactor {
-                label: "base_rank".to_string(),
-                detail: explanation.base_rank.to_string(),
-            },
-            IntelligenceRankingFactor {
-                label: "cluster_id".to_string(),
-                detail: explanation.cluster_assignment.cluster_id.clone(),
-            },
-            IntelligenceRankingFactor {
-                label: "preference_timing_delta".to_string(),
-                detail: format!(
-                    "{:.3}",
-                    explanation.preference_adjustment.timing_confidence_delta
-                ),
-            },
-        ],
+        ranking_factors,
     }
 }
 

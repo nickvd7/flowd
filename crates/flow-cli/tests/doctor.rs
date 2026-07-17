@@ -31,19 +31,14 @@ fn doctor_reports_healthy_local_state() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(
-        stdout,
-        concat!(
-            "daemon: running\n",
-            "database: ok\n",
-            "watch paths: configured\n",
-            "events observed: yes\n",
-            "patterns detected: yes\n",
-            "suggestions available: yes\n",
-            "automations: 1 active\n",
-            "intelligence layer: disabled\n",
-        )
-    );
+    assert!(stdout.contains("daemon: running\n"));
+    assert!(stdout.contains("database: ok\n"));
+    assert!(stdout.contains("watch paths: configured\n"));
+    assert!(stdout.contains("events observed: yes\n"));
+    assert!(stdout.contains("patterns detected: yes\n"));
+    assert!(stdout.contains("suggestions available: yes\n"));
+    assert!(stdout.contains("automations: 1 active\n"));
+    assert!(stdout.contains("intelligence layer: disabled in config · entitlement:"));
 }
 
 #[test]
@@ -76,7 +71,7 @@ fn doctor_reports_degraded_state_without_database_or_valid_watch_path() {
     assert!(stdout.contains("patterns detected: unknown\n"));
     assert!(stdout.contains("suggestions available: unknown\n"));
     assert!(stdout.contains("automations: unknown\n"));
-    assert!(stdout.contains("intelligence layer: disabled\n"));
+    assert!(stdout.contains("intelligence layer: disabled in config · entitlement:"));
 }
 
 fn seed_database(db_path: &Path) {

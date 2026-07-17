@@ -8,7 +8,7 @@ Local-first, terminal-first workflow automation for repeated file workflows.
 
 > Status: `v0.3.0` pre-release on the road to `1.0.0`. Usable for local evaluation; see [roadmap to 1.0](docs/roadmap-v1.md).
 
-**Support:** open-core bugs and usage help via [GitHub Issues](https://github.com/nickvd7/flowd/issues/new/choose). Private Intelligence / commercial questions via [flowd.net contact](https://flowd.net/#contact). Process: [Support](docs/support.md).
+**Support:** open-core bugs and usage help via [GitHub Issues](https://github.com/nickvd7/flowd/issues/new/choose). Private Intelligence / commercial questions via [flowd.net contact](https://flowd.net/#contact). Process: [Support](docs/support.md). Pricing tiers (Open / Eval / Pro / Team): [flowd.net/#pricing](https://flowd.net/#pricing) and [Private Intelligence](docs/intelligence.md).
 
 flowd observes local file workflows, detects repeated patterns, and suggests automations you can approve from the terminal.
 
@@ -282,6 +282,12 @@ flowd -> flowd-intelligence
 # Private Intelligence (requires sibling checkout of flowd-intelligence)
 cargo install --path crates/flow-cli --features intelligence
 cargo install --path crates/flow-daemon --features intelligence
+
+# Local entitlement (or FLOWD_INTELLIGENCE_DEV=1 for development)
+mkdir -p ~/.config/flowd
+cp examples/intelligence.license.toml ~/.config/flowd/intelligence.license.toml
+# config.toml: intelligence_enabled = true
+flowctl doctor
 ```
 
 Open-core remains fully functional without intelligence. Full product boundary: [Private Intelligence](docs/intelligence.md). Privacy defaults: [Privacy](docs/privacy.md).
