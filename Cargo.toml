@@ -30,4 +30,4 @@ thiserror = "2"
 toml = "0.8"
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 tempfile = "3"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }

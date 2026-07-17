@@ -95,15 +95,122 @@ impl BrowserDownloadsObserver {
 }
 
 pub fn visit_event(url: &str, title: &str) -> RawEvent {
+    visit_event_with_options(Utc::now(), url, title, true)
+}
+
+pub fn visit_event_with_options(
+    ts: DateTime<Utc>,
+    url: &str,
+    title: &str,
+    strip_query_strings: bool,
+) -> RawEvent {
     RawEvent {
-        ts: Utc::now(),
+        ts,
         source: EventSource::Browser,
         payload: json!({
             "kind": "visit",
-            "url": url,
-            "title": title
+            "url": sanitize_url(url, strip_query_strings),
+            "title": title,
         }),
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BrowserVisitRecord {
+    pub ts: DateTime<Utc>,
+    pub url: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub browser: Option<String>,
+}
+
+/// Polls a local NDJSON browser-visit bridge (observation only; never automates the browser).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserVisitsObserver {
+    bridge_path: PathBuf,
+    strip_query_strings: bool,
+    consumed_line_count: usize,
+    last_seen_content_len: usize,
+}
+
+impl BrowserVisitsObserver {
+    pub fn new(bridge_path: PathBuf, strip_query_strings: bool) -> Self {
+        Self {
+            bridge_path,
+            strip_query_strings,
+            consumed_line_count: 0,
+            last_seen_content_len: 0,
+        }
+    }
+
+    pub fn poll(&mut self) -> Result<Vec<RawEvent>, BrowserBridgeError> {
+        let content = match fs::read_to_string(&self.bridge_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(BrowserBridgeError::Io(format!(
+                    "failed to read browser visits bridge {}: {error}",
+                    self.bridge_path.display()
+                )))
+            }
+        };
+
+        let complete_lines: Vec<&str> = content
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .map(|line| line.trim_end_matches('\n'))
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+
+        if content.len() < self.last_seen_content_len
+            || complete_lines.len() < self.consumed_line_count
+        {
+            self.consumed_line_count = 0;
+        }
+
+        let mut events = Vec::new();
+        for line in complete_lines.iter().skip(self.consumed_line_count) {
+            events.push(visit_line_to_raw_event(line, self.strip_query_strings)?);
+        }
+
+        self.consumed_line_count = complete_lines.len();
+        self.last_seen_content_len = content.len();
+        Ok(events)
+    }
+}
+
+pub fn visit_line_to_raw_event(
+    line: &str,
+    strip_query_strings: bool,
+) -> Result<RawEvent, BrowserBridgeError> {
+    let record: BrowserVisitRecord = serde_json::from_str(line).map_err(|error| {
+        BrowserBridgeError::InvalidRecord(format!("invalid browser visit record: {error}"))
+    })?;
+    visit_record_to_raw_event(&record, strip_query_strings)
+}
+
+pub fn visit_record_to_raw_event(
+    record: &BrowserVisitRecord,
+    strip_query_strings: bool,
+) -> Result<RawEvent, BrowserBridgeError> {
+    let url = record.url.trim();
+    if url.is_empty() {
+        return Err(BrowserBridgeError::InvalidRecord(
+            "browser visit record url must not be empty".to_string(),
+        ));
+    }
+
+    Ok(RawEvent {
+        ts: record.ts,
+        source: EventSource::Browser,
+        payload: json!({
+            "kind": "visit",
+            "url": sanitize_url(url, strip_query_strings),
+            "title": record.title.clone().unwrap_or_default(),
+            "browser": record.browser,
+        }),
+    })
 }
 
 pub fn download_line_to_raw_event(
@@ -266,6 +373,33 @@ mod tests {
         let third_poll = observer.poll().unwrap();
         assert_eq!(third_poll.len(), 1);
         assert_eq!(third_poll[0].payload["filename"], "report.csv");
+    }
+
+    #[test]
+    fn visit_record_strips_query_strings() {
+        let raw = visit_line_to_raw_event(
+            r#"{"ts":"2026-03-13T10:00:02Z","url":"https://example.test/docs?token=secret","title":"Docs","browser":"chrome"}"#,
+            true,
+        )
+        .unwrap();
+        assert_eq!(raw.payload["kind"], "visit");
+        assert_eq!(raw.payload["url"], "https://example.test/docs");
+        assert_eq!(raw.payload["title"], "Docs");
+    }
+
+    #[test]
+    fn visits_observer_ingests_complete_records() {
+        let dir = tempdir().unwrap();
+        let bridge_path = dir.path().join("browser-visits.ndjson");
+        fs::write(
+            &bridge_path,
+            "{\"ts\":\"2026-03-13T10:00:02Z\",\"url\":\"https://example.test/a\",\"title\":\"A\"}\n",
+        )
+        .unwrap();
+        let mut observer = BrowserVisitsObserver::new(bridge_path, true);
+        let events = observer.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["kind"], "visit");
     }
 
     #[test]

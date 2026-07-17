@@ -13,7 +13,10 @@ use flow_analysis::{
 };
 use flow_db::{
     migrations::run_migrations,
-    repo::{insert_normalized_event_record, list_suggestions, StoredSuggestion},
+    repo::{
+        insert_normalized_event_record, list_delayed_suggestions, list_suggestions,
+        StoredSuggestion,
+    },
 };
 use flow_patterns::normalize::normalize;
 use rusqlite::{params, Connection};
@@ -34,6 +37,7 @@ struct FixtureFeedback {
 #[derive(Debug, Clone, PartialEq)]
 struct FixtureSnapshot {
     persisted: Vec<StoredSuggestion>,
+    delayed: Vec<StoredSuggestion>,
     ranked: Vec<StoredSuggestion>,
     displayed: Vec<StoredSuggestion>,
     explainability: Vec<SuggestionDisplayResult>,
@@ -489,14 +493,18 @@ fn run_integrated_fixture_snapshot() -> FixtureSnapshot {
     stabilize_suggestion_timestamps(&conn);
 
     let persisted = list_suggestions(&conn).unwrap();
+    let delayed = list_delayed_suggestions(&conn).unwrap();
     let ranked = rank_stored_suggestions(&persisted, &client).unwrap();
     let displayed = display_stored_suggestions(&persisted, &client).unwrap();
+    let mut explain_inputs = persisted.clone();
+    explain_inputs.extend(delayed.clone());
     let explainability = IntelligenceBoundary::new(&client)
-        .evaluate_stored_suggestions_for_display(&persisted)
+        .evaluate_stored_suggestions_for_display(&explain_inputs)
         .unwrap();
 
     FixtureSnapshot {
         persisted,
+        delayed,
         ranked,
         displayed,
         explainability,
@@ -566,14 +574,15 @@ fn intelligence_fixture_respects_delayed_and_suppressed_decisions() {
         .map(|suggestion| suggestion.signature.as_str())
         .collect();
 
-    assert_eq!(persisted_signatures.len(), 3);
+    // Current pending list excludes delayed freshness; receipt is delayed.
+    assert_eq!(persisted_signatures.len(), 2);
     assert!(persisted_signatures
         .iter()
         .any(|value| value.starts_with("CreateFile:invoice")));
     assert!(persisted_signatures
         .iter()
         .any(|value| value.starts_with("CreateFile:screenshot")));
-    assert!(persisted_signatures
+    assert!(!persisted_signatures
         .iter()
         .any(|value| value.starts_with("CreateFile:receipt")));
     assert!(!persisted_signatures
@@ -586,6 +595,11 @@ fn intelligence_fixture_respects_delayed_and_suppressed_decisions() {
     assert!(!displayed_signatures
         .iter()
         .any(|value| value.starts_with("CreateFile:receipt")));
+    assert_eq!(snapshot.delayed.len(), 1);
+    assert!(snapshot.delayed[0]
+        .signature
+        .starts_with("CreateFile:receipt"));
+    assert_eq!(snapshot.delayed[0].freshness, "delayed");
 }
 
 #[test]

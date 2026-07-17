@@ -22,15 +22,19 @@
 - better safety filtering
 
 ## v0.3
-- live private intelligence client wiring
-- local LLM labeling
-- semantic clustering
-- personalization and feedback memory
-- anti-annoyance policy refinements
-- event-triggered automation polish
+- live private intelligence client wiring (optional feature + config knobs)
+- local LLM labeling (localhost-only, metadata display)
+- semantic clustering (heuristic; richer live candidate context)
+- personalization and feedback memory (`flowctl preferences`)
+- anti-annoyance policy refinements (daily cap, Delay freshness, cooldown knobs)
+- event-triggered automation polish (path-scoped auto-run, debounce, download triggers)
+- privacy-safe browser visit observation bridge
+- local team policy packs (`flowctl policy export|import`)
 
 ## Non-goals for early versions
 - cloud sync of capture data
 - full autonomous computer control
 - destructive shell automation
 - deep instrumentation of every app / screen recording
+- browser control / CDP automation
+- remote multi-tenant admin dashboards

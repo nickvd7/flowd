@@ -79,12 +79,45 @@ pub fn plan(spec: &AutomationSpec) -> Result<ExecutionReport> {
         .as_deref()
         .ok_or_else(|| anyhow!("automation trigger path is missing"))?;
     let trigger_dir = PathBuf::from(trigger_dir);
-
     let candidates = matching_files(spec, &trigger_dir)?;
+    plan_for_candidates(spec, &candidates)
+}
+
+/// Plan operations for a single concrete trigger file when it matches the spec.
+pub fn plan_for_path(spec: &AutomationSpec, path: &Path) -> Result<ExecutionReport> {
+    if !path.is_file() {
+        return Ok(ExecutionReport {
+            operations: Vec::new(),
+        });
+    }
+    if !file_matches_trigger(spec, path) {
+        return Ok(ExecutionReport {
+            operations: Vec::new(),
+        });
+    }
+    plan_for_candidates(spec, &[path.to_path_buf()])
+}
+
+pub fn execute(spec: &AutomationSpec) -> Result<ExecutionReport> {
+    let report = plan(spec)?;
+    apply_report(&report)?;
+    Ok(report)
+}
+
+pub fn execute_for_path(spec: &AutomationSpec, path: &Path) -> Result<ExecutionReport> {
+    let report = plan_for_path(spec, path)?;
+    if report.operations.is_empty() {
+        return Ok(report);
+    }
+    apply_report(&report)?;
+    Ok(report)
+}
+
+fn plan_for_candidates(spec: &AutomationSpec, candidates: &[PathBuf]) -> Result<ExecutionReport> {
     let mut operations = Vec::new();
 
     for candidate in candidates {
-        let mut current = candidate;
+        let mut current = candidate.clone();
         for action in &spec.actions {
             let next = match action {
                 Action::Rename { template } => {
@@ -115,12 +148,6 @@ pub fn plan(spec: &AutomationSpec) -> Result<ExecutionReport> {
 
     validate_operations(&operations)?;
     Ok(ExecutionReport { operations })
-}
-
-pub fn execute(spec: &AutomationSpec) -> Result<ExecutionReport> {
-    let report = plan(spec)?;
-    apply_report(&report)?;
-    Ok(report)
 }
 
 /// Undo only supports reversible filesystem actions that were stored in
@@ -183,39 +210,51 @@ fn matching_files(spec: &AutomationSpec, trigger_dir: &Path) -> Result<Vec<PathB
     {
         let entry = entry?;
         let path = entry.path();
-
-        if !path.is_file() {
-            continue;
+        if path.is_file() && file_matches_trigger(spec, &path) {
+            files.push(path);
         }
-
-        if let Some(extension) = spec.trigger.extension.as_deref() {
-            let path_extension = path
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("");
-            if !path_extension.eq_ignore_ascii_case(extension) {
-                continue;
-            }
-        }
-
-        if let Some(fragment) = spec.trigger.name_contains.as_deref() {
-            let name = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("");
-            if !name
-                .to_ascii_lowercase()
-                .contains(&fragment.to_ascii_lowercase())
-            {
-                continue;
-            }
-        }
-
-        files.push(path);
     }
 
     files.sort();
     Ok(files)
+}
+
+pub fn file_matches_trigger(spec: &AutomationSpec, path: &Path) -> bool {
+    if let Some(trigger_dir) = spec.trigger.path.as_deref() {
+        let trigger_dir = PathBuf::from(trigger_dir);
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        if parent != trigger_dir.as_path() {
+            return false;
+        }
+    }
+
+    if let Some(extension) = spec.trigger.extension.as_deref() {
+        let path_extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let expected = extension.trim_start_matches('.');
+        if !path_extension.eq_ignore_ascii_case(expected) {
+            return false;
+        }
+    }
+
+    if let Some(fragment) = spec.trigger.name_contains.as_deref() {
+        let name = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if !name
+            .to_ascii_lowercase()
+            .contains(&fragment.to_ascii_lowercase())
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn render_template(path: &Path, template: &str) -> Result<String> {
@@ -384,6 +423,27 @@ mod tests {
         assert_eq!(report.operations.len(), 2);
         assert!(!source.join("invoice-1004.pdf").exists());
         assert!(destination.join("invoice-1004-reviewed.pdf").exists());
+    }
+
+    #[test]
+    fn plan_for_path_scopes_to_one_matching_file() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("inbox");
+        let destination = dir.path().join("archive");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("invoice-1005.pdf"), "invoice").unwrap();
+        fs::write(source.join("invoice-1006.pdf"), "invoice").unwrap();
+        let spec = invoice_spec(&source, &destination);
+        let target = source.join("invoice-1005.pdf");
+
+        let report = plan_for_path(&spec, &target).unwrap();
+
+        assert_eq!(report.operations.len(), 2);
+        assert!(report.operations[0].from.ends_with("invoice-1005.pdf"));
+        assert!(!report
+            .operations
+            .iter()
+            .any(|operation| operation.from.ends_with("invoice-1006.pdf")));
     }
 
     /// Undo tests validate that inverse plans are derived from stored

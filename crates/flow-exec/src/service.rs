@@ -1,5 +1,6 @@
 use crate::engine::{
-    dry_run, execute, execute_report, plan, plan_undo, ExecutionReport, StoredExecutionReport,
+    dry_run, execute, execute_for_path, execute_report, plan, plan_undo, ExecutionReport,
+    StoredExecutionReport,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
@@ -118,6 +119,30 @@ pub fn dry_run_automation(conn: &Connection, automation_id: i64) -> Result<DryRu
 
 pub fn execute_automation(conn: &Connection, automation_id: i64) -> Result<ExecutionReport> {
     execute_automation_with_force(conn, automation_id, false)
+}
+
+pub fn execute_automation_for_path(
+    conn: &Connection,
+    automation_id: i64,
+    path: &std::path::Path,
+) -> Result<ExecutionReport> {
+    let stored = load_stored_automation(conn, automation_id)?;
+    ensure_automation_status(automation_id, &stored.status)?;
+    let spec = flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")?;
+    ensure_dry_run_gate(conn, automation_id, &spec, false)?;
+    let report = match execute_for_path(&spec, path) {
+        Ok(report) => report,
+        Err(error) => {
+            set_automation_status(conn, automation_id, AUTOMATION_STATUS_FAILED)
+                .context("failed to update automation status")?;
+            store_failed_run_record(conn, automation_id, &error.to_string())?;
+            return Err(error).context("failed to execute automation for trigger path");
+        }
+    };
+    if !report.operations.is_empty() {
+        store_run_record(conn, automation_id, "completed", &report)?;
+    }
+    Ok(report)
 }
 
 pub fn execute_automation_with_force(

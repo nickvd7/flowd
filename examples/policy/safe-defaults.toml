@@ -1,0 +1,12 @@
+[policy]
+name = "safe-defaults"
+schema_version = 1
+description = "Conservative local team policy pack for shared machines."
+
+[constraints]
+force_auto_run_approved_automations = false
+force_intelligence_enabled = false
+max_suggestion_daily_cap = 8
+observed_folders_allowlist = ["~/Downloads", "~/Desktop"]
+allow_local_llm = false
+allow_browser_visit_observation = false

@@ -1,9 +1,13 @@
 mod pack_registry;
+mod policy;
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use pack_registry::{LoadedRegistry, RegistrySource};
+use policy::{
+    apply_policy_to_config, export_policy_from_config, load_policy_pack, write_policy_pack,
+};
 use flow_analysis::intelligence_boundary::{
     build_envelope_from_contexts, map_stored_suggestions_to_contexts, ExplainabilitySource,
     IntelligenceBoundary, IntelligenceClient, InternalFeedbackSummary, InternalPatternMetadata,
@@ -17,15 +21,18 @@ use flow_core::config::{
     expand_home, preferred_setup_config_path, Config, ConfigSource, LoadedConfig,
 };
 use flow_core::events::{ActionType, NormalizedEvent};
+use flow_analysis::local_llm::{label_workflow, LocalLlmLabelRequest};
 use flow_db::{
     open_database,
     repo::{
-        get_automation, get_suggestion, increment_rejected, increment_shown, increment_snoozed,
-        list_all_suggestion_records, list_automations, list_patterns, list_raw_events_after,
-        list_recent_sessions, list_sessions, list_suggestions, list_suggestions_for_export,
-        load_example_events_for_pattern, load_local_usage_stats, set_suggestion_status,
-        LocalUsageStats, StoredPattern, StoredRawEvent, StoredSession, StoredSuggestion,
-        StoredSuggestionForExport, StoredSuggestionRecord,
+        count_suggestions_shown_today, get_automation, get_suggestion, increment_rejected,
+        increment_shown, increment_snoozed, insert_automation, insert_suggestion,
+        list_all_suggestion_records, list_automations, list_patterns, list_preference_summaries,
+        list_raw_events_after, list_recent_sessions, list_sessions, list_suggestions,
+        list_suggestions_for_export, load_example_events_for_pattern, load_local_usage_stats,
+        set_suggestion_status, upsert_pattern, LocalUsageStats, StoredPattern, StoredRawEvent,
+        StoredSession, StoredSuggestion, StoredSuggestionForExport, StoredSuggestionRecord,
+        AUTOMATION_STATUS_ACTIVE,
     },
 };
 use flow_dsl::{Action, AutomationSpec, WorkflowPackManifest};
@@ -162,6 +169,13 @@ enum Commands {
         #[command(subcommand)]
         command: Option<PacksCommand>,
     },
+    #[command(about = "Show aggregated local preference / feedback memory")]
+    Preferences,
+    #[command(about = "Export or import a local team policy pack")]
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
     #[command(
         about = "Export local intelligence evaluation facts and feedback",
         after_help = INTELLIGENCE_AFTER_HELP
@@ -275,6 +289,29 @@ enum PacksCommand {
         #[arg(long, help = "Overwrite an existing installed pack with the same id")]
         force: bool,
     },
+    #[command(about = "Enable automations from an installed pack (still requires dry-run before run)")]
+    Enable {
+        #[arg(help = "Installed pack id")]
+        pack_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PolicyCommand {
+    #[command(about = "Export a local team policy pack from the current config")]
+    Export {
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, default_value = "local-team-policy")]
+        name: String,
+    },
+    #[command(about = "Import a local team policy pack and clamp the active config")]
+    Import {
+        #[arg(long, value_name = "PATH")]
+        path: PathBuf,
+        #[arg(long, help = "Write the clamped config back to the active config file")]
+        write: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -380,6 +417,16 @@ fn run() -> anyhow::Result<()> {
                 registry,
                 force,
             } => install_pack_command(&path_or_id, registry.as_deref(), force)?,
+            PacksCommand::Enable { pack_id } => enable_installed_pack_command(&context, &pack_id)?,
+        },
+        Some(Commands::Preferences) => render_preferences(&context)?,
+        Some(Commands::Policy { command }) => match command {
+            PolicyCommand::Export { output, name } => {
+                export_policy_command(&context, &output, &name)?
+            }
+            PolicyCommand::Import { path, write } => {
+                import_policy_command(&context, &path, write)?
+            }
         },
         Some(Commands::Intelligence { command }) => match command {
             IntelligenceCommand::ExportFeedback {
@@ -795,6 +842,149 @@ fn install_pack_from_directory(pack_dir: &Path, force: bool) -> anyhow::Result<(
     Ok(())
 }
 
+fn enable_installed_pack_command(context: &RuntimeContext, pack_id: &str) -> anyhow::Result<()> {
+    let pack_dir = packs_root_path().join(pack_id);
+    if !pack_dir.is_dir() {
+        anyhow::bail!(
+            "pack '{pack_id}' is not installed; use `flowctl packs install` first (looked in {})",
+            pack_dir.display()
+        );
+    }
+    let manifest = validate_pack(&pack_dir)?;
+    let conn = open_cli_database(context)?;
+    let created_at = Utc::now().to_rfc3339();
+    let mut enabled = 0usize;
+
+    for automation_ref in &manifest.automation {
+        let spec_path = pack_dir.join(&automation_ref.file);
+        let yaml = fs::read_to_string(&spec_path)
+            .with_context(|| format!("failed to read {}", spec_path.display()))?;
+        let spec = flow_dsl::parse_spec(&yaml)
+            .with_context(|| format!("failed to parse {}", spec_path.display()))?;
+        let signature = format!("pack:{}:{}", manifest.pack.id, spec.id);
+        let pattern_id = upsert_pattern(
+            &conn,
+            &signature,
+            1,
+            0,
+            &manifest.pack.name,
+            &created_at,
+            0.9,
+            0.7,
+        )
+        .context("failed to upsert pack pattern")?;
+        let suggestion_id = insert_suggestion(
+            &conn,
+            pattern_id,
+            &format!("Pack automation: {}", spec.id),
+            &created_at,
+            0.7,
+        )
+        .context("failed to insert pack suggestion")?;
+        set_suggestion_status(&conn, suggestion_id, "approved")
+            .context("failed to approve pack suggestion")?;
+        let automation_id = insert_automation(
+            &conn,
+            suggestion_id,
+            &yaml,
+            AUTOMATION_STATUS_ACTIVE,
+            &spec.id,
+            &created_at,
+        )
+        .context("failed to insert pack automation")?;
+        println!(
+            "enabled pack automation '{}' as automation_id={automation_id} (dry-run required before run)",
+            spec.id
+        );
+        enabled += 1;
+    }
+
+    println!(
+        "Enabled {enabled} automation(s) from pack '{}'. Inspect with: flowctl automations",
+        manifest.pack.id
+    );
+    Ok(())
+}
+
+fn render_preferences(context: &RuntimeContext) -> anyhow::Result<()> {
+    let conn = open_cli_database(context)?;
+    let rows = list_preference_summaries(&conn).context("failed to read preference summaries")?;
+    if rows.is_empty() {
+        println!("No preference / feedback memory stored yet.");
+        println!("Approve, reject, or snooze suggestions to build local memory.");
+        return Ok(());
+    }
+
+    println!("Local preference memory (aggregated by pattern signature):");
+    for row in rows {
+        println!(
+            "{}\taccepted={}\trejected={}\tsnoozed={}\tshown={}",
+            row.signature,
+            row.accepted_count,
+            row.rejected_count,
+            row.snoozed_count,
+            row.shown_count
+        );
+    }
+    Ok(())
+}
+
+fn export_policy_command(
+    context: &RuntimeContext,
+    output: &Path,
+    name: &str,
+) -> anyhow::Result<()> {
+    let pack = export_policy_from_config(&context.loaded_config.config, name);
+    write_policy_pack(output, &pack)?;
+    println!(
+        "Wrote team policy pack '{}' to {}",
+        pack.policy.name,
+        output.display()
+    );
+    Ok(())
+}
+
+fn import_policy_command(
+    context: &RuntimeContext,
+    path: &Path,
+    write: bool,
+) -> anyhow::Result<()> {
+    let pack = load_policy_pack(path)?;
+    let mut config = context.loaded_config.config.clone();
+    let notes = apply_policy_to_config(&mut config, &pack)?;
+
+    println!(
+        "Applied policy '{}' (schema {})",
+        pack.policy.name, pack.policy.schema_version
+    );
+    if notes.is_empty() {
+        println!("No config changes were required.");
+    } else {
+        for note in &notes {
+            println!("- {note}");
+        }
+    }
+
+    if write {
+        let destination = match &context.loaded_config.source {
+            ConfigSource::File(path) => path.clone(),
+            ConfigSource::Default => preferred_setup_config_path()
+                .context("failed to resolve config path for policy write")?,
+        };
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&destination, config.to_pretty_toml()?)
+            .with_context(|| format!("failed to write config {}", destination.display()))?;
+        println!("Wrote clamped config to {}", destination.display());
+    } else {
+        println!("Dry view only. Re-run with --write to persist the clamped config.");
+        println!();
+        print!("{}", config.to_pretty_toml()?);
+    }
+    Ok(())
+}
+
 fn packs_root_path() -> PathBuf {
     match flow_core::config::standard_config_path() {
         Some(config_path) => config_path
@@ -874,7 +1064,7 @@ fn render_config_command(
 fn resolve_intelligence_client(config: &Config) -> Box<dyn IntelligenceClient> {
     #[cfg(feature = "intelligence")]
     if config.intelligence_enabled {
-        return Box::new(PrivateIntelligenceClient::default());
+        return Box::new(PrivateIntelligenceClient::from_open_core_config(config));
     }
     let _ = config;
     Box::new(NoopIntelligenceClient)
@@ -1303,6 +1493,22 @@ fn explain_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> a
 
     for line in render_suggestion_explanation_report(&resolved, &preview) {
         println!("{line}");
+    }
+
+    let config = &context.loaded_config.config;
+    if config.local_llm_enabled {
+        let labeled = label_workflow(&LocalLlmLabelRequest {
+            endpoint: config.local_llm_endpoint.clone(),
+            model: config.local_llm_model.clone(),
+            pattern_summary: resolved.suggestion.canonical_summary.clone(),
+            proposal_text: resolved.suggestion.proposal_text.clone(),
+        })?;
+        println!();
+        println!(
+            "Local label ({})",
+            labeled.source
+        );
+        println!("{}", labeled.label);
     }
 
     Ok(())
@@ -2117,22 +2323,43 @@ fn suggestion_display_results(
         })
         .collect::<Vec<_>>();
 
-    if should_bypass_intelligence_ranking(&context.loaded_config.config) {
-        return Ok(suggestions
+    let mut results = if should_bypass_intelligence_ranking(&context.loaded_config.config) {
+        suggestions
             .into_iter()
             .map(|suggestion| SuggestionDisplayResult {
                 explainability: baseline_fallback_explainability(&suggestion),
                 suggestion,
                 action: SuggestionDecisionAction::Keep,
             })
-            .collect());
-    }
+            .collect()
+    } else {
+        IntelligenceBoundary::new(intelligence_client)
+            .evaluate_stored_suggestions_for_display(&suggestions)?
+            .into_iter()
+            .filter(|result| result.action == SuggestionDecisionAction::Keep)
+            .collect()
+    };
 
-    Ok(IntelligenceBoundary::new(intelligence_client)
-        .evaluate_stored_suggestions_for_display(&suggestions)?
-        .into_iter()
-        .filter(|result| result.action == SuggestionDecisionAction::Keep)
-        .collect())
+    apply_suggestion_daily_cap(conn, &context.loaded_config.config, &mut results)?;
+    Ok(results)
+}
+
+fn apply_suggestion_daily_cap(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    results: &mut Vec<SuggestionDisplayResult>,
+) -> anyhow::Result<()> {
+    let cap = config.suggestion_daily_cap;
+    if cap == 0 {
+        return Ok(());
+    }
+    let already_shown = count_suggestions_shown_today(conn)
+        .context("failed to count suggestions shown today")?;
+    let remaining = cap.saturating_sub(already_shown) as usize;
+    if results.len() > remaining {
+        results.truncate(remaining);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]

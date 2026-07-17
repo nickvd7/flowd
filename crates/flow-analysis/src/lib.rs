@@ -1,12 +1,13 @@
 pub mod intelligence_boundary;
+pub mod local_llm;
 #[cfg(feature = "intelligence")]
 pub mod private_intelligence_client;
 
 use anyhow::{Context, Result};
 use flow_db::repo::{
-    clear_session_state, insert_normalized_events_for_raw_events, insert_session,
-    list_normalized_events, list_pending_observation_raw_events, list_suggestion_histories,
-    mark_stale_patterns_and_suggestions, suppress_suggestions_for_pattern,
+    clear_session_state, delay_suggestions_for_pattern, insert_normalized_events_for_raw_events,
+    insert_session, list_normalized_events, list_pending_observation_raw_events,
+    list_suggestion_histories, mark_stale_patterns_and_suggestions, suppress_suggestions_for_pattern,
     sync_suggestion_for_pattern, upsert_pattern,
 };
 use flow_patterns::{
@@ -93,18 +94,35 @@ pub fn refresh_analysis_state_with_intelligence(
             .iter()
             .find(|value| value.pattern_signature == pattern.signature)
             .expect("presentation must exist for every detected pattern");
-        if presentation.action == SuggestionDecisionAction::Suppress {
-            suppress_suggestions_for_pattern(&tx, pattern_id, presentation.usefulness_score)
-                .context("failed to suppress suggestion")?;
-        } else {
-            sync_suggestion_for_pattern(
-                &tx,
-                pattern_id,
-                &presentation.proposal_text,
-                &created_at,
-                presentation.usefulness_score,
-            )
-            .context("failed to sync suggestion")?;
+        match presentation.action {
+            SuggestionDecisionAction::Suppress => {
+                suppress_suggestions_for_pattern(&tx, pattern_id, presentation.usefulness_score)
+                    .context("failed to suppress suggestion")?;
+            }
+            SuggestionDecisionAction::Delay => {
+                // Persist the suggestion first, then mark it delayed so it stays
+                // out of the current pending list until timing allows a Keep.
+                sync_suggestion_for_pattern(
+                    &tx,
+                    pattern_id,
+                    &presentation.proposal_text,
+                    &created_at,
+                    presentation.usefulness_score,
+                )
+                .context("failed to sync delayed suggestion")?;
+                delay_suggestions_for_pattern(&tx, pattern_id, presentation.usefulness_score)
+                    .context("failed to delay suggestion")?;
+            }
+            SuggestionDecisionAction::Keep => {
+                sync_suggestion_for_pattern(
+                    &tx,
+                    pattern_id,
+                    &presentation.proposal_text,
+                    &created_at,
+                    presentation.usefulness_score,
+                )
+                .context("failed to sync suggestion")?;
+            }
         }
         active_pattern_ids.push(pattern_id);
     }

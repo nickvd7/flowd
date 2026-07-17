@@ -69,7 +69,7 @@ $ flowctl teach from-session --latest
 $ flowctl approve <suggestion_id>
 ```
 
-For more realistic cases, see [Example Workflows](docs/example-workflows.md). To install shared packs from a local or HTTPS index, see [Pack Registry](docs/pack-registry.md).
+For more realistic cases, see [Example Workflows](docs/example-workflows.md). To install shared packs from a local or HTTPS index, see [Pack Registry](docs/pack-registry.md). Browser observation stays privacy-safe via the [Browser Bridge](docs/browser-bridge.md). Shared machines can clamp settings with [Team Policy](docs/team-policy.md).
 
 ## Installation
 
@@ -190,6 +190,10 @@ flowctl packs validate ./examples/packs/demo-pack
 flowctl packs install ./examples/packs/demo-pack
 flowctl packs search --registry ./examples/registry/index.toml
 flowctl packs install demo.rename-downloads --registry ./examples/registry/index.toml
+flowctl packs enable demo.rename-downloads
+flowctl preferences
+flowctl policy export --output ./team-policy.toml
+flowctl policy import --path ./examples/policy/safe-defaults.toml
 flowctl automations
 flowctl automations show <automation_id>
 flowctl dry-run <automation_id>

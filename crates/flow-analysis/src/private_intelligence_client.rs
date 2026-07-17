@@ -10,11 +10,12 @@ use crate::intelligence_boundary::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use flow_core::config::Config;
 use flowd_intelligence::contracts::{
     evaluate_for_display, ActionSafety, AdapterConfig, DisplayCandidate, DisplayDecision,
     DisplayedSuggestion, HiddenSuggestion, PersonalizationSubject, PreferenceSignalKind,
-    ProposalTone, SuggestionCandidate, SuggestionContext, SuggestionSignals, SuppressionDecision,
-    TimingDecision, UserPreferenceSignal,
+    ProposalRefinementMode, ProposalTone, SuggestionCandidate, SuggestionContext,
+    SuggestionSignals, SuppressionDecision, TimingDecision, UserPreferenceSignal,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -25,6 +26,25 @@ pub struct PrivateIntelligenceClient {
 impl PrivateIntelligenceClient {
     pub fn new(config: AdapterConfig) -> Self {
         Self { config }
+    }
+
+    /// Map open-core config knobs onto the private adapter policy surface.
+    pub fn from_open_core_config(config: &Config) -> Self {
+        let mut adapter = AdapterConfig::default();
+        adapter.suppression_policy.rejected_cooldown_seconds =
+            config.intelligence_rejected_cooldown_secs;
+        adapter.suppression_policy.snoozed_cooldown_seconds =
+            config.intelligence_snoozed_cooldown_secs;
+        adapter.suppression_policy.recently_shown_cooldown_seconds =
+            config.intelligence_shown_cooldown_secs;
+        adapter.suppression_policy.minimum_score_for_show =
+            config.intelligence_minimum_score_for_show as f32;
+        if config.local_llm_enabled {
+            // Local heuristic refinement stays in the private crate; open-core
+            // may additionally call a localhost LLM for display labels only.
+            adapter.proposal_refinement_mode = ProposalRefinementMode::LocalHeuristic;
+        }
+        Self::new(adapter)
     }
 }
 
@@ -45,6 +65,10 @@ fn map_request_to_display_inputs(
     let now_ts = resolve_now_ts(request);
     let mut candidates = Vec::with_capacity(request.candidates.len());
     let mut preference_signals = Vec::new();
+    let mut accepted_by_action: std::collections::BTreeMap<String, u32> =
+        std::collections::BTreeMap::new();
+    let mut rejected_by_action: std::collections::BTreeMap<String, u32> =
+        std::collections::BTreeMap::new();
 
     for candidate in &request.candidates {
         let action_sequence = action_sequence_from_signature(&candidate.pattern_signature);
@@ -73,6 +97,10 @@ fn map_request_to_display_inputs(
             PreferenceSignalKind::SnoozedPattern,
             candidate.history.snoozed_count,
         );
+        *accepted_by_action.entry(action_key.clone()).or_default() +=
+            candidate.history.accepted_count;
+        *rejected_by_action.entry(action_key.clone()).or_default() +=
+            candidate.history.rejected_count;
 
         let repetition = candidate.suggestion.count.clamp(1, u32::MAX as usize) as u32;
         let duration_ms = candidate.suggestion.avg_duration_ms.max(0) as u64;
@@ -101,6 +129,9 @@ fn map_request_to_display_inputs(
         } else {
             candidate.suggestion.baseline_proposal_text.clone()
         };
+        let file_group = object_token_from_signature(&candidate.pattern_signature);
+        let target_descriptor = move_target_hint(&candidate.suggestion.baseline_proposal_text)
+            .or_else(|| file_group.clone());
 
         let suggestion = SuggestionCandidate::new(
             candidate.pattern_signature.clone(),
@@ -142,12 +173,44 @@ fn map_request_to_display_inputs(
             context,
             subject,
             action_sequence,
-            None::<String>,
-            None::<String>,
-            None::<String>,
-            None::<String>,
+            file_group.clone(),
+            target_descriptor.clone(),
+            file_group,
+            target_descriptor,
             ProposalTone::ActionOriented,
         ));
+    }
+
+    // Cross-pattern similar-action memory for personalization.
+    for candidate in &request.candidates {
+        let action_key = action_sequence_from_signature(&candidate.pattern_signature)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "workflow".to_string());
+        let subject =
+            PersonalizationSubject::new(candidate.pattern_signature.clone(), action_key.clone());
+        let accepted_similar = accepted_by_action
+            .get(&action_key)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(candidate.history.accepted_count);
+        let rejected_similar = rejected_by_action
+            .get(&action_key)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(candidate.history.rejected_count);
+        push_preference_signal(
+            &mut preference_signals,
+            subject.clone(),
+            PreferenceSignalKind::AcceptedSimilarAction,
+            accepted_similar,
+        );
+        push_preference_signal(
+            &mut preference_signals,
+            subject,
+            PreferenceSignalKind::RejectedSimilarAction,
+            rejected_similar,
+        );
     }
 
     (candidates, preference_signals)
@@ -339,6 +402,25 @@ fn push_preference_signal(
     if count > 0 {
         signals.push(UserPreferenceSignal::new(subject, kind, count));
     }
+}
+
+fn object_token_from_signature(signature: &str) -> Option<String> {
+    signature
+        .split("->")
+        .filter_map(|part| part.split(':').nth(1))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn move_target_hint(proposal_text: &str) -> Option<String> {
+    let lowered = proposal_text.to_ascii_lowercase();
+    for needle in ["archive", "invoices", "screenshots", "receipts", "statements"] {
+        if lowered.contains(needle) {
+            return Some(needle.to_string());
+        }
+    }
+    None
 }
 
 fn action_sequence_from_signature(signature: &str) -> Vec<String> {

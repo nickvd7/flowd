@@ -671,6 +671,139 @@ pub fn suppress_suggestions_for_pattern(
     Ok(())
 }
 
+pub fn delay_suggestions_for_pattern(
+    conn: &Connection,
+    pattern_id: i64,
+    usefulness_score: f64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE suggestions SET freshness = 'delayed', usefulness_score = ?2 WHERE pattern_id = ?1 AND status = 'pending'",
+        params![pattern_id, usefulness_score],
+    )?;
+    Ok(())
+}
+
+/// Pending suggestions marked delayed by anti-annoyance timing decisions.
+pub fn list_delayed_suggestions(conn: &Connection) -> rusqlite::Result<Vec<StoredSuggestion>> {
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            suggestions.id,
+            patterns.id,
+            patterns.signature,
+            patterns.count,
+            patterns.avg_duration_ms,
+            COALESCE(patterns.canonical_summary, ''),
+            suggestions.proposal_json,
+            suggestions.usefulness_score,
+            suggestions.freshness,
+            COALESCE(patterns.last_seen_at, ''),
+            suggestions.created_at,
+            suggestions.shown_count,
+            suggestions.accepted_count,
+            suggestions.rejected_count,
+            suggestions.snoozed_count,
+            suggestions.last_shown_ts,
+            suggestions.last_accepted_ts,
+            suggestions.last_rejected_ts,
+            suggestions.last_snoozed_ts
+        FROM suggestions
+        INNER JOIN patterns ON patterns.id = suggestions.pattern_id
+        WHERE suggestions.status = 'pending'
+            AND suggestions.freshness = 'delayed'
+            AND patterns.is_active = 1
+        ORDER BY suggestions.usefulness_score DESC, patterns.count DESC, patterns.signature ASC, suggestions.created_at ASC
+        "#,
+    )?;
+
+    let rows = statement.query_map([], |row| {
+        let proposal_json: String = row.get(6)?;
+        let proposal: Value = serde_json::from_str(&proposal_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                proposal_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+
+        Ok(StoredSuggestion {
+            suggestion_id: row.get(0)?,
+            pattern_id: row.get(1)?,
+            signature: row.get(2)?,
+            count: row.get::<_, i64>(3)? as usize,
+            avg_duration_ms: row.get(4)?,
+            canonical_summary: row.get(5)?,
+            proposal_text: proposal
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            usefulness_score: row.get(7)?,
+            freshness: row.get(8)?,
+            last_seen_at: row.get(9)?,
+            created_at: row.get(10)?,
+            shown_count: row.get::<_, i64>(11)? as u32,
+            accepted_count: row.get::<_, i64>(12)? as u32,
+            rejected_count: row.get::<_, i64>(13)? as u32,
+            snoozed_count: row.get::<_, i64>(14)? as u32,
+            last_shown_ts: row.get(15)?,
+            last_accepted_ts: row.get(16)?,
+            last_rejected_ts: row.get(17)?,
+            last_snoozed_ts: row.get(18)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Count suggestion displays recorded today (UTC) via `last_shown_ts`.
+pub fn count_suggestions_shown_today(conn: &Connection) -> rusqlite::Result<u32> {
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let prefix = format!("{today}T");
+    conn.query_row(
+        "SELECT COUNT(*) FROM suggestions WHERE last_shown_ts IS NOT NULL AND last_shown_ts LIKE ?1",
+        params![format!("{prefix}%")],
+        |row| row.get::<_, i64>(0).map(|value| value.max(0) as u32),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreferenceSummaryRow {
+    pub signature: String,
+    pub accepted_count: u32,
+    pub rejected_count: u32,
+    pub snoozed_count: u32,
+    pub shown_count: u32,
+}
+
+pub fn list_preference_summaries(conn: &Connection) -> rusqlite::Result<Vec<PreferenceSummaryRow>> {
+    let mut statement = conn.prepare(
+        "SELECT patterns.signature,
+                COALESCE(SUM(suggestions.accepted_count), 0),
+                COALESCE(SUM(suggestions.rejected_count), 0),
+                COALESCE(SUM(suggestions.snoozed_count), 0),
+                COALESCE(SUM(suggestions.shown_count), 0)
+         FROM suggestions
+         JOIN patterns ON patterns.id = suggestions.pattern_id
+         GROUP BY patterns.signature
+         HAVING COALESCE(SUM(suggestions.accepted_count), 0)
+              + COALESCE(SUM(suggestions.rejected_count), 0)
+              + COALESCE(SUM(suggestions.snoozed_count), 0)
+              + COALESCE(SUM(suggestions.shown_count), 0) > 0
+         ORDER BY COALESCE(SUM(suggestions.accepted_count), 0) DESC,
+                  patterns.signature ASC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(PreferenceSummaryRow {
+            signature: row.get(0)?,
+            accepted_count: row.get::<_, i64>(1)?.max(0) as u32,
+            rejected_count: row.get::<_, i64>(2)?.max(0) as u32,
+            snoozed_count: row.get::<_, i64>(3)?.max(0) as u32,
+            shown_count: row.get::<_, i64>(4)?.max(0) as u32,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn mark_stale_patterns_and_suggestions(
     conn: &Connection,
     active_pattern_ids: &[i64],

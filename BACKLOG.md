@@ -2,21 +2,18 @@
 
 ## Now
 
-_(empty — pick from Later when prioritized)_
+_(empty)_
 
 ## Next
 
-_(empty — pick from Later when prioritized)_
+_(empty)_
 
 ## Later
 
-### feat/browser-automation-bridge
-Only consider if there is a very strong privacy-safe local design.
-
-### feat/team-admin-controls
-Enterprise-oriented, not needed for near-term MVP.
+_(empty — revisit only if product priorities change)_
 
 ## Done recently
+- v0.3 slices: event-triggered auto-run polish, anti-annoyance daily cap + Delay freshness, preference memory CLI, clustering context wiring, local LLM labeling (localhost), browser visit observation bridge, local team policy packs
 - example workflows refreshed for terminal directory/`mv` patterns
 - workflow pack registry client (`flowctl packs search` / install by id)
 - terminal `mv`/`cp` into directory destinations and multi-source transfers

@@ -65,9 +65,24 @@ pub struct Config {
     pub redact_command_args: bool,
     pub strip_browser_query_strings: bool,
     pub suggestion_min_usefulness_score: f64,
+    /// Maximum suggestions to show per UTC day. `0` means unlimited.
+    pub suggestion_daily_cap: u32,
     pub intelligence_enabled: bool,
+    pub intelligence_rejected_cooldown_secs: i64,
+    pub intelligence_snoozed_cooldown_secs: i64,
+    pub intelligence_shown_cooldown_secs: i64,
+    pub intelligence_minimum_score_for_show: f64,
     pub session_inactivity_secs: i64,
     pub file_event_dedup_window_ms: i64,
+    pub auto_run_debounce_ms: u64,
+    pub auto_run_on_browser_downloads: bool,
+    pub auto_run_trigger_file_only: bool,
+    pub observe_browser_visits: bool,
+    pub browser_visits_bridge_path: String,
+    /// Opt-in local LLM labeling (metadata only; never executes actions).
+    pub local_llm_enabled: bool,
+    pub local_llm_endpoint: String,
+    pub local_llm_model: String,
 }
 
 impl Default for Config {
@@ -89,9 +104,22 @@ impl Default for Config {
             redact_command_args: true,
             strip_browser_query_strings: true,
             suggestion_min_usefulness_score: 0.0,
+            suggestion_daily_cap: 0,
             intelligence_enabled: false,
+            intelligence_rejected_cooldown_secs: 14_400,
+            intelligence_snoozed_cooldown_secs: 7_200,
+            intelligence_shown_cooldown_secs: 7_200,
+            intelligence_minimum_score_for_show: 12.0,
             session_inactivity_secs: 300,
             file_event_dedup_window_ms: 500,
+            auto_run_debounce_ms: 1_500,
+            auto_run_on_browser_downloads: false,
+            auto_run_trigger_file_only: true,
+            observe_browser_visits: false,
+            browser_visits_bridge_path: "~/.flowd/browser-visits.ndjson".to_string(),
+            local_llm_enabled: false,
+            local_llm_endpoint: "http://127.0.0.1:11434".to_string(),
+            local_llm_model: "llama3.2".to_string(),
         }
     }
 }
@@ -155,6 +183,13 @@ impl Config {
             ));
         }
 
+        if self.observe_browser_visits && self.browser_visits_bridge_path.trim().is_empty() {
+            return Err(FlowError::Validation(
+                "browser_visits_bridge_path must not be empty when browser visit observation is enabled"
+                    .to_string(),
+            ));
+        }
+
         if self
             .observed_folders
             .iter()
@@ -171,6 +206,36 @@ impl Config {
             return Err(FlowError::Validation(
                 "suggestion_min_usefulness_score must be between 0.0 and 1.0".to_string(),
             ));
+        }
+
+        if !self.intelligence_minimum_score_for_show.is_finite()
+            || self.intelligence_minimum_score_for_show < 0.0
+        {
+            return Err(FlowError::Validation(
+                "intelligence_minimum_score_for_show must be a finite non-negative number"
+                    .to_string(),
+            ));
+        }
+
+        for (name, value) in [
+            (
+                "intelligence_rejected_cooldown_secs",
+                self.intelligence_rejected_cooldown_secs,
+            ),
+            (
+                "intelligence_snoozed_cooldown_secs",
+                self.intelligence_snoozed_cooldown_secs,
+            ),
+            (
+                "intelligence_shown_cooldown_secs",
+                self.intelligence_shown_cooldown_secs,
+            ),
+        ] {
+            if value < 0 {
+                return Err(FlowError::Validation(format!(
+                    "{name} must be greater than or equal to zero"
+                )));
+            }
         }
 
         if self.session_inactivity_secs <= 0 {
@@ -195,6 +260,26 @@ impl Config {
             return Err(FlowError::Validation(
                 "clipboard_poll_interval_ms must be greater than zero".to_string(),
             ));
+        }
+
+        if self.local_llm_enabled && self.local_llm_endpoint.trim().is_empty() {
+            return Err(FlowError::Validation(
+                "local_llm_endpoint must not be empty when local_llm_enabled is true".to_string(),
+            ));
+        }
+
+        if self.local_llm_enabled {
+            let endpoint = self.local_llm_endpoint.trim();
+            if !(endpoint.starts_with("http://127.0.0.1")
+                || endpoint.starts_with("http://localhost")
+                || endpoint.starts_with("https://127.0.0.1")
+                || endpoint.starts_with("https://localhost"))
+            {
+                return Err(FlowError::Validation(
+                    "local_llm_endpoint must point at localhost/127.0.0.1 for privacy-safe labeling"
+                        .to_string(),
+                ));
+            }
         }
 
         Ok(())

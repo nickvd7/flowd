@@ -36,3 +36,21 @@ flowd -> flowd-intelligence
 
 Mapping lives in `crates/flow-analysis/src/private_intelligence_client.rs` and
 calls `flowd_intelligence::contracts::evaluate_for_display`.
+
+Open-core config knobs mapped into the adapter:
+
+```toml
+intelligence_enabled = true
+intelligence_rejected_cooldown_secs = 14400
+intelligence_snoozed_cooldown_secs = 7200
+intelligence_shown_cooldown_secs = 7200
+intelligence_minimum_score_for_show = 12.0
+suggestion_daily_cap = 8
+local_llm_enabled = false
+local_llm_endpoint = "http://127.0.0.1:11434"
+local_llm_model = "llama3.2"
+```
+
+Delay decisions persist as `freshness = delayed` so they stay out of the current
+pending list. Local LLM labeling is localhost-only metadata for
+`flowctl suggestions explain` and never executes actions.

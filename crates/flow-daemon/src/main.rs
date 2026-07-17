@@ -3,7 +3,9 @@ mod observation;
 use anyhow::{Context, Result};
 use chrono::Duration;
 use clap::Parser;
-use flow_adapters::browser::{BrowserBridgeError, BrowserDownloadsObserver};
+use flow_adapters::browser::{
+    BrowserBridgeError, BrowserDownloadsObserver, BrowserVisitsObserver,
+};
 use flow_adapters::clipboard::{ClipboardObserver, ClipboardReadError, CommandClipboardReader};
 use flow_adapters::file_watcher::{event_to_file_events, notify_channel, watch_path};
 use flow_adapters::terminal::{TerminalBridgeError, TerminalHistoryObserver};
@@ -11,13 +13,15 @@ use flow_analysis::catch_up_analysis;
 #[cfg(feature = "intelligence")]
 use flow_analysis::{catch_up_analysis_with_intelligence, PrivateIntelligenceClient};
 use flow_core::config::{expand_home, Config};
+use flow_core::events::RawEvent;
 use flow_db::open_database as open_sqlite_database;
 use flow_db::repo::list_automations;
-use flow_exec::execute_automation;
+use flow_exec::{execute_automation, execute_automation_for_path};
 use observation::ObservationPipeline;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration as StdDuration, Instant};
 
 #[derive(Debug, Parser)]
 #[command(name = "flow-daemon", version, about = "Daemon for flowd")]
@@ -48,7 +52,9 @@ fn run() -> Result<()> {
         ObservationPipeline::new(Duration::milliseconds(config.file_event_dedup_window_ms));
     let mut clipboard = build_clipboard_observer(&config);
     let mut browser_downloads = build_browser_downloads_observer(&config);
+    let mut browser_visits = build_browser_visits_observer(&config);
     let mut terminal_history = build_terminal_history_observer(&config);
+    let mut last_auto_run_at: Option<Instant> = None;
 
     for path in &observed_paths {
         watch_path(&mut watcher, path)
@@ -85,6 +91,12 @@ fn run() -> Result<()> {
     if config.auto_run_approved_automations {
         println!("auto-run of approved automations enabled (requires a prior dry-run)");
     }
+    if config.observe_browser_visits {
+        println!(
+            "browser visit observation enabled at {}",
+            expand_home(&config.browser_visits_bridge_path).display()
+        );
+    }
 
     loop {
         match rx.recv_timeout(std::time::Duration::from_millis(
@@ -92,8 +104,9 @@ fn run() -> Result<()> {
         )) {
             Ok(result) => match result {
                 Ok(event) => {
-                    let mut accepted_file_event = false;
+                    let mut trigger_paths = Vec::new();
                     for file_event in event_to_file_events(&event) {
+                        let trigger_path = file_event.path.clone();
                         let Some(raw_event) = observation
                             .accept(&conn, file_event)
                             .context("failed during observation")?
@@ -101,13 +114,18 @@ fn run() -> Result<()> {
                             continue;
                         };
 
-                        accepted_file_event = true;
+                        trigger_paths.push(PathBuf::from(trigger_path));
                         refresh_daemon_analysis(&mut conn, &config)
                             .context("failed during analysis refresh")?;
                         println!("{}", serde_json::to_string(&raw_event)?);
                     }
-                    if accepted_file_event && config.auto_run_approved_automations {
-                        maybe_auto_run_approved_automations(&conn)?;
+                    if !trigger_paths.is_empty() && config.auto_run_approved_automations {
+                        maybe_auto_run_approved_automations(
+                            &conn,
+                            &config,
+                            &trigger_paths,
+                            &mut last_auto_run_at,
+                        )?;
                     }
                 }
                 Err(error) => eprintln!("watch error: {error}"),
@@ -134,10 +152,41 @@ fn run() -> Result<()> {
         if let Some(observer) = browser_downloads.as_mut() {
             match observer.poll() {
                 Ok(raw_events) => {
+                    let mut trigger_paths = Vec::new();
                     for raw_event in raw_events {
+                        if let Some(path) = download_path_from_event(&raw_event) {
+                            trigger_paths.push(path);
+                        }
                         observation
                             .accept_raw_event(&conn, raw_event.clone())
                             .context("failed during browser download observation")?;
+                        refresh_daemon_analysis(&mut conn, &config)
+                            .context("failed during analysis refresh")?;
+                        println!("{}", serde_json::to_string(&raw_event)?);
+                    }
+                    if config.auto_run_approved_automations
+                        && config.auto_run_on_browser_downloads
+                        && !trigger_paths.is_empty()
+                    {
+                        maybe_auto_run_approved_automations(
+                            &conn,
+                            &config,
+                            &trigger_paths,
+                            &mut last_auto_run_at,
+                        )?;
+                    }
+                }
+                Err(error) => handle_browser_bridge_error(error),
+            }
+        }
+
+        if let Some(observer) = browser_visits.as_mut() {
+            match observer.poll() {
+                Ok(raw_events) => {
+                    for raw_event in raw_events {
+                        observation
+                            .accept_raw_event(&conn, raw_event.clone())
+                            .context("failed during browser visit observation")?;
                         refresh_daemon_analysis(&mut conn, &config)
                             .context("failed during analysis refresh")?;
                         println!("{}", serde_json::to_string(&raw_event)?);
@@ -173,7 +222,7 @@ fn refresh_daemon_analysis(conn: &mut Connection, config: &Config) -> Result<()>
         return catch_up_analysis_with_intelligence(
             conn,
             config.session_inactivity_secs,
-            &PrivateIntelligenceClient::default(),
+            &PrivateIntelligenceClient::from_open_core_config(config),
         );
     }
 
@@ -203,6 +252,17 @@ fn build_browser_downloads_observer(config: &Config) -> Option<BrowserDownloadsO
     ))
 }
 
+fn build_browser_visits_observer(config: &Config) -> Option<BrowserVisitsObserver> {
+    if !config.observe_browser_visits {
+        return None;
+    }
+
+    Some(BrowserVisitsObserver::new(
+        expand_home(&config.browser_visits_bridge_path),
+        config.strip_browser_query_strings,
+    ))
+}
+
 fn build_terminal_history_observer(config: &Config) -> Option<TerminalHistoryObserver> {
     if !config.observe_terminal {
         return None;
@@ -213,15 +273,59 @@ fn build_terminal_history_observer(config: &Config) -> Option<TerminalHistoryObs
     )))
 }
 
-fn maybe_auto_run_approved_automations(conn: &Connection) -> Result<()> {
+fn maybe_auto_run_approved_automations(
+    conn: &Connection,
+    config: &Config,
+    trigger_paths: &[PathBuf],
+    last_auto_run_at: &mut Option<Instant>,
+) -> Result<()> {
+    if config.auto_run_debounce_ms > 0 {
+        if let Some(previous) = *last_auto_run_at {
+            if previous.elapsed() < StdDuration::from_millis(config.auto_run_debounce_ms) {
+                return Ok(());
+            }
+        }
+    }
+
     let automations = list_automations(conn).context("failed to list automations for auto-run")?;
+    let mut ran_any = false;
     for automation in automations
         .into_iter()
         .filter(|automation| automation.status == "active")
     {
-        match execute_automation(conn, automation.automation_id) {
+        let result = if config.auto_run_trigger_file_only && !trigger_paths.is_empty() {
+            let mut operations = Vec::new();
+            let mut first_error = None;
+            for path in trigger_paths {
+                match execute_automation_for_path(conn, automation.automation_id, path) {
+                    Ok(report) => operations.extend(report.operations),
+                    Err(error) => {
+                        let message = error.to_string();
+                        if message.contains("dry-run") {
+                            first_error = Some(error);
+                            break;
+                        }
+                        eprintln!(
+                            "auto-run error for automation {} on {}: {error:#}",
+                            automation.automation_id,
+                            path.display()
+                        );
+                    }
+                }
+            }
+            if let Some(error) = first_error {
+                Err(error)
+            } else {
+                Ok(flow_exec::ExecutionReport { operations })
+            }
+        } else {
+            execute_automation(conn, automation.automation_id)
+        };
+
+        match result {
             Ok(report) if report.operations.is_empty() => {}
             Ok(report) => {
+                ran_any = true;
                 for operation in report.operations {
                     println!(
                         "auto-run {}: {} -> {}",
@@ -241,7 +345,21 @@ fn maybe_auto_run_approved_automations(conn: &Connection) -> Result<()> {
             }
         }
     }
+
+    if ran_any || trigger_paths.is_empty() {
+        *last_auto_run_at = Some(Instant::now());
+    }
     Ok(())
+}
+
+fn download_path_from_event(event: &RawEvent) -> Option<PathBuf> {
+    event
+        .payload
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn handle_clipboard_error(error: ClipboardReadError) {
