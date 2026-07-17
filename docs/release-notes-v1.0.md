@@ -9,6 +9,8 @@ false-positive bar in `docs/roadmap-v1.md`.
 
 ## Highlights
 
+- Clear open-core + **Private Intelligence** product split (decision quality
+  layer; still local) — see `docs/intelligence.md`
 - Execution path allowlist with symlink canonicalize matrix
 - `flowctl daemon start|stop|status|install-service` plus contrib units
 - Audit trail for every dry-run / apply / undo via `flowctl runs` and

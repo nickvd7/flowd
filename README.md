@@ -10,18 +10,28 @@ Local-first, terminal-first workflow automation for repeated file workflows.
 
 flowd observes local file workflows, detects repeated patterns, and suggests automations you can approve from the terminal.
 
-- Local-first
-- Terminal-first
-- Deterministic automations
-- Safe approvals with dry-run + undo
-- Explainable suggestions
-- Local history and usage insights
+- Local-first open-core engine
+- Terminal-first CLI + daemon
+- Deterministic automations with dry-run + undo
+- Optional **Private Intelligence** for ranking, timing, and quiet suggestions
+- Explainable suggestions and local audit trail
 
 ## What is flowd?
 
 flowd solves a simple problem: many file workflows are repetitive, but writing automation rules by hand is tedious. It watches local activity, recognizes repeated sequences such as rename and move actions, and turns them into suggestions you can inspect before anything is automated.
 
-The current implementation is focused on deterministic, file-oriented workflows:
+### Open core + Private Intelligence
+
+| Layer | Role |
+| --- | --- |
+| **Open core (`flowd`)** | Capture, patterns, baseline suggestions, approve / dry-run / run / undo, path allowlist |
+| **Private Intelligence (`flowd-intelligence`)** | Which suggestions surface, when, and how they are worded |
+
+The workflow engine is open. **Decision quality is the product.** Private does not mean cloud — intelligence evaluates locally against your SQLite history. Open-core stays fully useful with intelligence off.
+
+See [Private Intelligence](docs/intelligence.md).
+
+The current open-core implementation is focused on deterministic, file-oriented workflows:
 
 - filesystem observation (default)
 - optional clipboard and browser-download bridges
@@ -30,7 +40,7 @@ The current implementation is focused on deterministic, file-oriented workflows:
 - suggestion explainability, history, stats/insights
 - approval-driven execution with required dry-run and undo
 
-Approved automations run locally via `flowctl run` (or optional daemon auto-run after a dry-run). The system remains useful without any cloud service or private intelligence layer.
+Approved automations run locally via `flowctl run` (or optional daemon auto-run after a dry-run).
 
 ## Demo
 
@@ -69,7 +79,7 @@ $ flowctl teach from-session --latest
 $ flowctl approve <suggestion_id>
 ```
 
-For more realistic cases, see [Example Workflows](docs/example-workflows.md). To install shared packs from a local or HTTPS index, see [Pack Registry](docs/pack-registry.md). Browser observation stays privacy-safe via the [Browser Bridge](docs/browser-bridge.md). Shared machines can clamp settings with [Team Policy](docs/team-policy.md).
+For more realistic cases, see [Example Workflows](docs/example-workflows.md). For quieter, ranked suggestions, see [Private Intelligence](docs/intelligence.md). To install shared packs from a local or HTTPS index, see [Pack Registry](docs/pack-registry.md). Browser observation stays privacy-safe via the [Browser Bridge](docs/browser-bridge.md). Shared machines can clamp settings with [Team Policy](docs/team-policy.md).
 
 ## Installation
 
@@ -258,19 +268,21 @@ filesystem events
 
 `flowd` is the open-core workflow engine. It owns event capture, persistence, sessions, pattern detection, baseline suggestions, automations, execution, undo, and explainability plumbing.
 
-An optional private decision layer, `flowd-intelligence`, can improve suggestion quality through ranking, timing, suppression, personalization, clustering, wording, and display decisions. Build with `--features intelligence` and set `intelligence_enabled = true` to enable the live client. Default builds keep the noop boundary so public CI never depends on the private crate. The integration direction is one-way:
+**Private Intelligence** (`flowd-intelligence`) is the decision-quality product layer: ranking, timing, suppression, personalization, clustering, wording, and display decisions. That layer is how suggestion quality becomes a product — not by moving your files to the cloud, but by deciding what the CLI shows.
+
+Build with `--features intelligence` and set `intelligence_enabled = true` to enable the live client. Default builds keep the noop boundary so public CI never depends on the private crate. The integration direction is one-way:
 
 ```text
 flowd -> flowd-intelligence
 ```
 
 ```bash
-# optional private ranking (requires sibling checkout of flowd-intelligence)
+# Private Intelligence (requires sibling checkout of flowd-intelligence)
 cargo install --path crates/flow-cli --features intelligence
 cargo install --path crates/flow-daemon --features intelligence
 ```
 
-flowd remains fully functional without the intelligence layer. See [Privacy](docs/privacy.md).
+Open-core remains fully functional without intelligence. Full product boundary: [Private Intelligence](docs/intelligence.md). Privacy defaults: [Privacy](docs/privacy.md).
 
 Workspace crates:
 

@@ -7,6 +7,10 @@
 - no cloud dependency in the open-core engine
 - start with reversible actions only (rename / move)
 
+**Private Intelligence** (optional product layer) also evaluates locally.
+“Private” means a closed decision policy — ranking, timing, suppression,
+wording — not uploading capture data. See [Private Intelligence](./intelligence.md).
+
 ## What flowd collects
 
 | Source | Default | Stored locally | Notes |
