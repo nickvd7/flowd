@@ -92,7 +92,7 @@ fn setup_creates_config_and_prints_next_steps() {
     assert_eq!(
         stdout,
         format!(
-            "Created config: {}\nObserved folders: ~/Inbox\n\nNext steps:\n1. Start the daemon: flow-daemon --config {}\n2. Inspect generated config: flowctl --config {} config show\n3. Inspect suggestions: flowctl --config {} suggestions\n4. Review local stats: flowctl --config {} stats\n",
+            "Created config: {}\nObserved folders: ~/Inbox\n\nNext steps:\n1. Start the daemon: flowctl --config {} daemon start\n2. Inspect generated config: flowctl --config {} config show\n3. Inspect suggestions: flowctl --config {} suggestions\n4. Review local stats: flowctl --config {} stats\n",
             config_path.display(),
             config_path.display(),
             config_path.display(),
@@ -144,7 +144,7 @@ observed_folders = ["~/Downloads"]
     assert_eq!(
         stdout,
         format!(
-            "Config already exists: {}\nObserved folders: ~/Downloads\nNo changes were made.\nRequested watched paths were not applied. Re-run with --force to rewrite the config.\n\nNext steps:\n1. Start the daemon: flow-daemon --config {}\n2. Inspect generated config: flowctl --config {} config show\n3. Inspect suggestions: flowctl --config {} suggestions\n4. Review local stats: flowctl --config {} stats\n",
+            "Config already exists: {}\nObserved folders: ~/Downloads\nNo changes were made.\nRequested watched paths were not applied. Re-run with --force to rewrite the config.\n\nNext steps:\n1. Start the daemon: flowctl --config {} daemon start\n2. Inspect generated config: flowctl --config {} config show\n3. Inspect suggestions: flowctl --config {} suggestions\n4. Review local stats: flowctl --config {} stats\n",
             config_path.display(),
             config_path.display(),
             config_path.display(),

@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "flow-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "flowctl"
+path = "src/main.rs"
+
 [features]
 default = []
 intelligence = ["flow-analysis/intelligence"]

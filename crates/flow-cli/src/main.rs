@@ -1,3 +1,4 @@
+mod daemon_lifecycle;
 mod pack_registry;
 mod policy;
 
@@ -20,6 +21,7 @@ use flow_analysis::PrivateIntelligenceClient;
 use flow_core::config::{
     expand_home, preferred_setup_config_path, Config, ConfigSource, LoadedConfig,
 };
+use flow_core::PathAllowlist;
 use flow_core::events::{ActionType, NormalizedEvent};
 use flow_analysis::local_llm::{label_workflow, LocalLlmLabelRequest};
 use flow_db::{
@@ -118,6 +120,11 @@ enum Commands {
     Status,
     #[command(about = "Run lightweight local health checks for flowd")]
     Doctor,
+    #[command(about = "Start, stop, or install the local flow-daemon service")]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     #[command(about = "Create or update a local flowd config")]
     Setup {
         #[arg(long = "watch", value_name = "PATH")]
@@ -297,6 +304,18 @@ enum PacksCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    #[command(about = "Start flow-daemon in the background and write a pid file")]
+    Start,
+    #[command(about = "Stop a flow-daemon started by flowctl daemon start")]
+    Stop,
+    #[command(about = "Show whether flow-daemon appears to be running")]
+    Status,
+    #[command(about = "Install a user-level systemd or launchd unit for flow-daemon")]
+    InstallService,
+}
+
+#[derive(Debug, Subcommand)]
 enum PolicyCommand {
     #[command(about = "Export a local team policy pack from the current config")]
     Export {
@@ -384,6 +403,14 @@ fn run() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Status) => render_doctor(&context)?,
         Some(Commands::Doctor) => render_doctor(&context)?,
+        Some(Commands::Daemon { command }) => match command {
+            DaemonCommand::Start => daemon_lifecycle::start_daemon(&context.loaded_config)?,
+            DaemonCommand::Stop => daemon_lifecycle::stop_daemon()?,
+            DaemonCommand::Status => println!("{}", daemon_lifecycle::daemon_status()?),
+            DaemonCommand::InstallService => {
+                daemon_lifecycle::install_service(&context.loaded_config)?
+            }
+        },
         Some(Commands::Setup { .. }) => unreachable!("setup is handled before runtime config"),
         Some(Commands::Config { command }) => render_config_command(&context, command)?,
         Some(Commands::Stats) => render_stats(&context)?,
@@ -570,7 +597,10 @@ fn render_setup_report(
     skipped_watch_update: bool,
 ) -> Vec<String> {
     let flowctl_prefix = format!("flowctl --config {}", shell_quote(config_path));
-    let daemon_command = format!("flow-daemon --config {}", shell_quote(config_path));
+    let daemon_command = format!(
+        "flowctl --config {} daemon start",
+        shell_quote(config_path)
+    );
     let mut lines = vec![
         match action {
             SetupAction::Created => format!("Created config: {}", config_path.display()),
@@ -1489,7 +1519,8 @@ fn explain_suggestion_command(context: &RuntimeContext, suggestion_id: i64) -> a
     let resolved =
         resolve_suggestion_explanation(&conn, context, client.as_ref(), suggestion_id)?;
     let preview =
-        preview_suggestion(&conn, suggestion_id).context("failed to preview suggestion impact")?;
+        preview_suggestion(&conn, suggestion_id, &execution_allowlist(context))
+            .context("failed to preview suggestion impact")?;
 
     for line in render_suggestion_explanation_report(&resolved, &preview) {
         println!("{line}");
@@ -2173,7 +2204,8 @@ fn show_automation_command(context: &RuntimeContext, automation_id: i64) -> anyh
         .ok_or_else(|| anyhow::anyhow!("automation {automation_id} not found"))?;
     let spec = flow_dsl::parse_spec(&automation.spec_yaml).context("failed to parse automation")?;
     let preview =
-        preview_automation(&conn, automation_id).context("failed to preview automation impact")?;
+        preview_automation(&conn, automation_id, &execution_allowlist(context))
+            .context("failed to preview automation impact")?;
 
     for line in render_automation_report(&automation, &spec, &preview) {
         println!("{line}");
@@ -2207,7 +2239,8 @@ fn enable_automation_command(context: &RuntimeContext, automation_id: i64) -> an
 fn dry_run_automation_command(context: &RuntimeContext, automation_id: i64) -> anyhow::Result<()> {
     let conn = open_cli_database(context)?;
     let outcome =
-        dry_run_automation(&conn, automation_id).context("failed to dry-run automation")?;
+        dry_run_automation(&conn, automation_id, &execution_allowlist(context))
+            .context("failed to dry-run automation")?;
 
     for line in &outcome.preview {
         println!("{line}");
@@ -2222,8 +2255,9 @@ fn run_automation_command(
     force: bool,
 ) -> anyhow::Result<()> {
     let conn = open_cli_database(context)?;
-    let report = execute_automation_with_force(&conn, automation_id, force)
-        .context("failed to execute automation")?;
+    let report =
+        execute_automation_with_force(&conn, automation_id, force, &execution_allowlist(context))
+            .context("failed to execute automation")?;
 
     if report.operations.is_empty() {
         println!("No matching files.");
@@ -2277,7 +2311,8 @@ fn render_runs(context: &RuntimeContext) -> anyhow::Result<()> {
 /// safely.
 fn undo_run_command(context: &RuntimeContext, run_id: i64) -> anyhow::Result<()> {
     let conn = open_cli_database(context)?;
-    let outcome = undo_automation_run(&conn, run_id).context("failed to undo automation run")?;
+    let outcome = undo_automation_run(&conn, run_id, &execution_allowlist(context))
+        .context("failed to undo automation run")?;
 
     for operation in &outcome.report.operations {
         println!(
@@ -2287,6 +2322,18 @@ fn undo_run_command(context: &RuntimeContext, run_id: i64) -> anyhow::Result<()>
     }
     println!("Undid automation run {}.", outcome.source_run_id);
     Ok(())
+}
+
+fn execution_allowlist(context: &RuntimeContext) -> PathAllowlist {
+    if std::env::var_os("FLOWD_UNRESTRICTED_EXECUTION").is_some() {
+        return PathAllowlist::unrestricted();
+    }
+    let config = &context.loaded_config.config;
+    if config.enforce_execution_path_allowlist {
+        PathAllowlist::from_config(config)
+    } else {
+        PathAllowlist::unrestricted()
+    }
 }
 
 fn open_cli_database(context: &RuntimeContext) -> anyhow::Result<rusqlite::Connection> {

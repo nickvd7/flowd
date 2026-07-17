@@ -30,6 +30,12 @@
 - event-triggered automation polish (path-scoped auto-run, debounce, download triggers)
 - privacy-safe browser visit observation bridge
 - local team policy packs (`flowctl policy export|import`)
+- execution path allowlist
+- `flowctl daemon` lifecycle + user service install
+- tagged release workflow + install script
+
+## v1.0
+See [`docs/roadmap-v1.md`](./roadmap-v1.md) for the production checklist and exit criteria.
 
 ## Non-goals for early versions
 - cloud sync of capture data

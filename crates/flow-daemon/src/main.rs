@@ -14,6 +14,7 @@ use flow_analysis::catch_up_analysis;
 use flow_analysis::{catch_up_analysis_with_intelligence, PrivateIntelligenceClient};
 use flow_core::config::{expand_home, Config};
 use flow_core::events::RawEvent;
+use flow_core::PathAllowlist;
 use flow_db::open_database as open_sqlite_database;
 use flow_db::repo::list_automations;
 use flow_exec::{execute_automation, execute_automation_for_path};
@@ -287,6 +288,11 @@ fn maybe_auto_run_approved_automations(
         }
     }
 
+    let allowlist = if config.enforce_execution_path_allowlist {
+        PathAllowlist::from_config(config)
+    } else {
+        PathAllowlist::unrestricted()
+    };
     let automations = list_automations(conn).context("failed to list automations for auto-run")?;
     let mut ran_any = false;
     for automation in automations
@@ -297,7 +303,8 @@ fn maybe_auto_run_approved_automations(
             let mut operations = Vec::new();
             let mut first_error = None;
             for path in trigger_paths {
-                match execute_automation_for_path(conn, automation.automation_id, path) {
+                match execute_automation_for_path(conn, automation.automation_id, path, &allowlist)
+                {
                     Ok(report) => operations.extend(report.operations),
                     Err(error) => {
                         let message = error.to_string();
@@ -319,7 +326,7 @@ fn maybe_auto_run_approved_automations(
                 Ok(flow_exec::ExecutionReport { operations })
             }
         } else {
-            execute_automation(conn, automation.automation_id)
+            execute_automation(conn, automation.automation_id, &allowlist)
         };
 
         match result {

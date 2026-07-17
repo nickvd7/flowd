@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: |
+          cargo build --release -p flow-cli -p flow-daemon
+          mkdir -p dist
+          cp target/release/flowctl dist/flowctl-linux-x86_64
+          cp target/release/flow-cli dist/flow-cli-linux-x86_64
+          cp target/release/flow-daemon dist/flow-daemon-linux-x86_64
+          chmod +x dist/*
+          tar -C dist -czf flowd-linux-x86_64.tar.gz \
+            flowctl-linux-x86_64 flow-cli-linux-x86_64 flow-daemon-linux-x86_64
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowd-linux-x86_64
+          path: |
+            dist/*
+            flowd-linux-x86_64.tar.gz
+
+  publish:
+    name: Publish GitHub release
+    needs: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: flowd-linux-x86_64
+          path: release-assets
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

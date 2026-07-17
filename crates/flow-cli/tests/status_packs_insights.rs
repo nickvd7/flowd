@@ -178,9 +178,11 @@ fn run_without_dry_run_is_blocked() {
     fs::write(
         &config_path,
         format!(
-            "database_path = \"{}\"\nobserved_folders = [\"{}\"]\n",
+            "database_path = \"{}\"\nobserved_folders = [\"{}\"]\nexecution_allowed_roots = [\"{}\", \"{}\"]\n",
             db_path.display(),
-            inbox.display()
+            inbox.display(),
+            inbox.display(),
+            archive.display(),
         ),
     )
     .unwrap();

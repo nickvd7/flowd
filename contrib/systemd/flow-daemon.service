@@ -1,0 +1,14 @@
+[Unit]
+Description=flowd local observation daemon
+After=default.target
+
+[Service]
+Type=simple
+# Replace with absolute paths after install, or use:
+#   flowctl daemon install-service
+ExecStart=/usr/local/bin/flow-daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

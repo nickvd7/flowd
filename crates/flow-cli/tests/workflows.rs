@@ -24,6 +24,7 @@ fn patterns_renders_detected_workflows_table() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("patterns")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -69,6 +70,7 @@ fn suggestions_renders_detected_suggestions_table() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("suggestions")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -123,6 +125,7 @@ fn suggestions_explain_renders_explanation_column() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["suggestions", "--explain"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -142,6 +145,7 @@ fn suggestions_history_renders_deterministic_feedback_table() {
 
     let reject = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["reject", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -149,6 +153,7 @@ fn suggestions_history_renders_deterministic_feedback_table() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["suggestions", "history"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -199,6 +204,7 @@ fn suggestions_show_renders_history_details() {
 
     let snooze = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["snooze", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -206,6 +212,7 @@ fn suggestions_show_renders_history_details() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["suggestions", "show", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -226,6 +233,7 @@ fn suggestions_show_reports_missing_suggestion() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["suggestions", "show", "999"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -244,6 +252,7 @@ fn intelligence_export_feedback_writes_deterministic_json_file() {
 
     let suggest = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("suggestions")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -258,6 +267,7 @@ fn intelligence_export_feedback_writes_deterministic_json_file() {
             "--generated-at",
             "2026-03-13T12:00:00+00:00",
         ])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -308,6 +318,7 @@ fn intelligence_export_feedback_handles_empty_database() {
             "--generated-at",
             "2026-03-13T12:00:00+00:00",
         ])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -330,6 +341,7 @@ fn sessions_renders_recent_sessions_table() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("sessions")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -362,6 +374,7 @@ fn watch_once_renders_deterministic_activity_snapshot() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["watch", "--once"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -403,6 +416,7 @@ fn approve_creates_automation_and_lists_it() {
 
     let approve = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["approve", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -417,6 +431,7 @@ fn approve_creates_automation_and_lists_it() {
 
     let automations = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("automations")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -453,6 +468,7 @@ fn reject_updates_feedback_history_and_hides_suggestion() {
 
     let reject = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["reject", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -484,6 +500,7 @@ fn snooze_updates_feedback_history_and_hides_suggestion() {
 
     let snooze = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["snooze", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -516,6 +533,7 @@ fn disable_and_enable_update_automation_status_in_cli_output() {
 
     let disable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["disable", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -527,6 +545,7 @@ fn disable_and_enable_update_automation_status_in_cli_output() {
 
     let disabled = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("automations")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -538,6 +557,7 @@ fn disable_and_enable_update_automation_status_in_cli_output() {
 
     let enable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["enable", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -549,6 +569,7 @@ fn disable_and_enable_update_automation_status_in_cli_output() {
 
     let enabled = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("automations")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -568,6 +589,7 @@ fn automations_show_renders_detailed_report() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["automations", "show", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -577,7 +599,7 @@ fn automations_show_renders_detailed_report() {
     let conn = Connection::open(&db_path).unwrap();
     let automation = get_automation(&conn, 1).unwrap().unwrap();
     let spec = flow_dsl::parse_spec(&automation.spec_yaml).unwrap();
-    let preview = preview_automation(&conn, 1).unwrap();
+    let preview = preview_automation(&conn, 1, &flow_core::PathAllowlist::unrestricted()).unwrap();
     let expected = format_automation_report(&automation, &spec, &preview);
     let expected = format!(
         "{}\n\nNext steps:\n1. Preview this automation: flowctl dry-run 1\n2. Run this automation: flowctl run 1\n3. Review automation run history: flowctl runs\n",
@@ -603,11 +625,13 @@ fn automations_show_preview_is_deterministic() {
 
     let first = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["automations", "show", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
     let second = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["automations", "show", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -627,6 +651,7 @@ fn automations_show_preview_handles_missing_context_without_failing() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["automations", "show", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -646,6 +671,7 @@ fn automations_show_reports_missing_id() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["automations", "show", "999"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -664,6 +690,7 @@ fn automations_show_reflects_current_status() {
 
     let disable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["disable", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -671,6 +698,7 @@ fn automations_show_reflects_current_status() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["automations", "show", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -692,6 +720,7 @@ fn dry_run_previews_actions_and_records_a_run() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["dry-run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -731,6 +760,7 @@ fn full_open_core_loop_runs_from_observed_events_through_undo() {
 
     let suggest = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("suggest")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -740,6 +770,7 @@ fn full_open_core_loop_runs_from_observed_events_through_undo() {
 
     let approve = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["approve", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -753,6 +784,7 @@ fn full_open_core_loop_runs_from_observed_events_through_undo() {
 
     let dry_run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["dry-run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -768,6 +800,7 @@ fn full_open_core_loop_runs_from_observed_events_through_undo() {
 
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -783,6 +816,7 @@ fn full_open_core_loop_runs_from_observed_events_through_undo() {
 
     let runs = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("runs")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -793,6 +827,7 @@ fn full_open_core_loop_runs_from_observed_events_through_undo() {
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["undo", "2"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -835,6 +870,7 @@ fn run_executes_safe_file_automation_and_records_result() {
     dry_run_suggestion_automation(&db_path);
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -873,6 +909,7 @@ fn runs_lists_completed_execution_history() {
     dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -880,6 +917,7 @@ fn runs_lists_completed_execution_history() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("runs")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -905,6 +943,7 @@ fn undo_reverses_a_completed_rename_and_move_run_in_reverse_order() {
     dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -912,6 +951,7 @@ fn undo_reverses_a_completed_rename_and_move_run_in_reverse_order() {
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["undo", "2"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -952,6 +992,7 @@ fn undo_aborts_when_filesystem_state_is_no_longer_safe() {
     dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -961,6 +1002,7 @@ fn undo_aborts_when_filesystem_state_is_no_longer_safe() {
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["undo", "2"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -996,6 +1038,7 @@ fn undo_restores_a_completed_rename_only_run() {
     dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1004,6 +1047,7 @@ fn undo_restores_a_completed_rename_only_run() {
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["undo", "2"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1025,6 +1069,7 @@ fn undo_restores_a_completed_move_only_run() {
     dry_run_suggestion_automation(&db_path);
     let run = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1033,6 +1078,7 @@ fn undo_restores_a_completed_move_only_run() {
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["undo", "2"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1060,6 +1106,7 @@ fn undo_rejects_runs_with_unsupported_operations() {
 
     let undo = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["undo", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1081,6 +1128,7 @@ fn run_blocks_disabled_automation_without_mutating_files() {
 
     let disable = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["disable", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1088,6 +1136,7 @@ fn run_blocks_disabled_automation_without_mutating_files() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1", "--force"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1123,6 +1172,7 @@ fn run_marks_automation_failed_when_execution_errors() {
     // Skip the dry-run gate with --force so we exercise the failure path.
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["run", "1", "--force"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1131,6 +1181,7 @@ fn run_marks_automation_failed_when_execution_errors() {
 
     let automations = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .arg("automations")
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", &db_path)
         .output()
         .unwrap();
@@ -1618,6 +1669,7 @@ fn render_watch_suggestion_created(suggestion: &flow_db::repo::StoredSuggestionR
 fn approve_suggestion(db_path: &Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["approve", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", db_path)
         .output()
         .unwrap();
@@ -1628,6 +1680,7 @@ fn approve_suggestion(db_path: &Path) {
 fn dry_run_suggestion_automation(db_path: &Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_flow-cli"))
         .args(["dry-run", "1"])
+        .env("FLOWD_UNRESTRICTED_EXECUTION", "1")
         .env("FLOWD_DB_PATH", db_path)
         .output()
         .unwrap();

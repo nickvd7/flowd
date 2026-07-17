@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use flow_core::PathAllowlist;
 use flow_dsl::{Action, AutomationSpec};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -53,8 +54,8 @@ impl From<StoredExecutionReport> for ExecutionReport {
     }
 }
 
-pub fn dry_run(spec: &AutomationSpec) -> Result<Vec<String>> {
-    let report = plan(spec)?;
+pub fn dry_run(spec: &AutomationSpec, allowlist: &PathAllowlist) -> Result<Vec<String>> {
+    let report = plan(spec, allowlist)?;
 
     if report.operations.is_empty() {
         return Ok(vec!["No matching files.".to_string()]);
@@ -72,7 +73,7 @@ pub fn dry_run(spec: &AutomationSpec) -> Result<Vec<String>> {
         .collect())
 }
 
-pub fn plan(spec: &AutomationSpec) -> Result<ExecutionReport> {
+pub fn plan(spec: &AutomationSpec, allowlist: &PathAllowlist) -> Result<ExecutionReport> {
     let trigger_dir = spec
         .trigger
         .path
@@ -80,11 +81,15 @@ pub fn plan(spec: &AutomationSpec) -> Result<ExecutionReport> {
         .ok_or_else(|| anyhow!("automation trigger path is missing"))?;
     let trigger_dir = PathBuf::from(trigger_dir);
     let candidates = matching_files(spec, &trigger_dir)?;
-    plan_for_candidates(spec, &candidates)
+    plan_for_candidates(spec, &candidates, allowlist)
 }
 
 /// Plan operations for a single concrete trigger file when it matches the spec.
-pub fn plan_for_path(spec: &AutomationSpec, path: &Path) -> Result<ExecutionReport> {
+pub fn plan_for_path(
+    spec: &AutomationSpec,
+    path: &Path,
+    allowlist: &PathAllowlist,
+) -> Result<ExecutionReport> {
     if !path.is_file() {
         return Ok(ExecutionReport {
             operations: Vec::new(),
@@ -95,25 +100,33 @@ pub fn plan_for_path(spec: &AutomationSpec, path: &Path) -> Result<ExecutionRepo
             operations: Vec::new(),
         });
     }
-    plan_for_candidates(spec, &[path.to_path_buf()])
+    plan_for_candidates(spec, &[path.to_path_buf()], allowlist)
 }
 
-pub fn execute(spec: &AutomationSpec) -> Result<ExecutionReport> {
-    let report = plan(spec)?;
-    apply_report(&report)?;
+pub fn execute(spec: &AutomationSpec, allowlist: &PathAllowlist) -> Result<ExecutionReport> {
+    let report = plan(spec, allowlist)?;
+    apply_report(&report, allowlist)?;
     Ok(report)
 }
 
-pub fn execute_for_path(spec: &AutomationSpec, path: &Path) -> Result<ExecutionReport> {
-    let report = plan_for_path(spec, path)?;
+pub fn execute_for_path(
+    spec: &AutomationSpec,
+    path: &Path,
+    allowlist: &PathAllowlist,
+) -> Result<ExecutionReport> {
+    let report = plan_for_path(spec, path, allowlist)?;
     if report.operations.is_empty() {
         return Ok(report);
     }
-    apply_report(&report)?;
+    apply_report(&report, allowlist)?;
     Ok(report)
 }
 
-fn plan_for_candidates(spec: &AutomationSpec, candidates: &[PathBuf]) -> Result<ExecutionReport> {
+fn plan_for_candidates(
+    spec: &AutomationSpec,
+    candidates: &[PathBuf],
+    allowlist: &PathAllowlist,
+) -> Result<ExecutionReport> {
     let mut operations = Vec::new();
 
     for candidate in candidates {
@@ -146,7 +159,7 @@ fn plan_for_candidates(spec: &AutomationSpec, candidates: &[PathBuf]) -> Result<
         }
     }
 
-    validate_operations(&operations)?;
+    validate_operations(&operations, allowlist)?;
     Ok(ExecutionReport { operations })
 }
 
@@ -154,7 +167,7 @@ fn plan_for_candidates(spec: &AutomationSpec, candidates: &[PathBuf]) -> Result<
 /// `automation_runs` when the original run completed. The inverse plan is built
 /// by swapping `from` and `to` and reversing the operation order so later
 /// mutations are undone before earlier ones.
-pub fn plan_undo(report: &ExecutionReport) -> Result<ExecutionReport> {
+pub fn plan_undo(report: &ExecutionReport, allowlist: &PathAllowlist) -> Result<ExecutionReport> {
     let mut operations = Vec::with_capacity(report.operations.len());
 
     for operation in report.operations.iter().rev() {
@@ -168,17 +181,20 @@ pub fn plan_undo(report: &ExecutionReport) -> Result<ExecutionReport> {
         }
     }
 
-    validate_operations_without_fs(&operations)?;
+    validate_operations_without_fs(&operations, allowlist)?;
     Ok(ExecutionReport { operations })
 }
 
-pub fn execute_report(report: &ExecutionReport) -> Result<ExecutionReport> {
-    apply_report(report)?;
+pub fn execute_report(
+    report: &ExecutionReport,
+    allowlist: &PathAllowlist,
+) -> Result<ExecutionReport> {
+    apply_report(report, allowlist)?;
     Ok(report.clone())
 }
 
-fn apply_report(report: &ExecutionReport) -> Result<()> {
-    validate_operation_sequence(&report.operations)?;
+fn apply_report(report: &ExecutionReport, allowlist: &PathAllowlist) -> Result<()> {
+    validate_operation_sequence(&report.operations, allowlist)?;
 
     for operation in &report.operations {
         let from = Path::new(&operation.from);
@@ -283,14 +299,11 @@ fn render_template(path: &Path, template: &str) -> Result<String> {
         .replace("{ext}", extension))
 }
 
-fn validate_operations(operations: &[PlannedOperation]) -> Result<()> {
+fn validate_operations(operations: &[PlannedOperation], allowlist: &PathAllowlist) -> Result<()> {
+    validate_operations_without_fs(operations, allowlist)?;
     let mut seen_destinations = BTreeSet::new();
 
     for operation in operations {
-        if operation.from == operation.to {
-            bail!("refusing no-op {} for {}", operation.action, operation.from);
-        }
-
         if !seen_destinations.insert(operation.to.clone()) {
             bail!("multiple operations target {}", operation.to);
         }
@@ -308,8 +321,11 @@ fn validate_operations(operations: &[PlannedOperation]) -> Result<()> {
 /// that would overwrite an existing path. The validator simulates the full
 /// ordered plan against the current filesystem state so undo can abort before
 /// mutating anything if a later step would become unsafe.
-fn validate_operation_sequence(operations: &[PlannedOperation]) -> Result<()> {
-    validate_operations_without_fs(operations)?;
+fn validate_operation_sequence(
+    operations: &[PlannedOperation],
+    allowlist: &PathAllowlist,
+) -> Result<()> {
+    validate_operations_without_fs(operations, allowlist)?;
 
     let mut existing = BTreeSet::new();
     for operation in operations {
@@ -340,7 +356,10 @@ fn validate_operation_sequence(operations: &[PlannedOperation]) -> Result<()> {
     Ok(())
 }
 
-fn validate_operations_without_fs(operations: &[PlannedOperation]) -> Result<()> {
+fn validate_operations_without_fs(
+    operations: &[PlannedOperation],
+    allowlist: &PathAllowlist,
+) -> Result<()> {
     let mut seen_destinations = BTreeSet::new();
 
     for operation in operations {
@@ -356,6 +375,13 @@ fn validate_operations_without_fs(operations: &[PlannedOperation]) -> Result<()>
         if !seen_destinations.insert(operation.to.clone()) {
             bail!("multiple operations target {}", operation.to);
         }
+
+        allowlist
+            .ensure_allows(Path::new(&operation.from))
+            .map_err(|message| anyhow!(message))?;
+        allowlist
+            .ensure_allows(Path::new(&operation.to))
+            .map_err(|message| anyhow!(message))?;
     }
 
     Ok(())
@@ -391,6 +417,10 @@ mod tests {
         }
     }
 
+    fn allowlist_for(dir: &Path) -> PathAllowlist {
+        PathAllowlist::from_roots([dir.to_path_buf()])
+    }
+
     #[test]
     fn dry_run_lists_predicted_actions_without_mutating_files() {
         let dir = tempdir().unwrap();
@@ -399,8 +429,9 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("invoice-1003.pdf"), "invoice").unwrap();
         let spec = invoice_spec(&source, &destination);
+        let allowlist = allowlist_for(dir.path());
 
-        let preview = dry_run(&spec).unwrap();
+        let preview = dry_run(&spec, &allowlist).unwrap();
 
         assert_eq!(preview.len(), 2);
         assert!(preview[0].contains("rename"));
@@ -417,8 +448,9 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("invoice-1004.pdf"), "invoice").unwrap();
         let spec = invoice_spec(&source, &destination);
+        let allowlist = allowlist_for(dir.path());
 
-        let report = execute(&spec).unwrap();
+        let report = execute(&spec, &allowlist).unwrap();
 
         assert_eq!(report.operations.len(), 2);
         assert!(!source.join("invoice-1004.pdf").exists());
@@ -435,8 +467,9 @@ mod tests {
         fs::write(source.join("invoice-1006.pdf"), "invoice").unwrap();
         let spec = invoice_spec(&source, &destination);
         let target = source.join("invoice-1005.pdf");
+        let allowlist = allowlist_for(dir.path());
 
-        let report = plan_for_path(&spec, &target).unwrap();
+        let report = plan_for_path(&spec, &target, &allowlist).unwrap();
 
         assert_eq!(report.operations.len(), 2);
         assert!(report.operations[0].from.ends_with("invoice-1005.pdf"));
@@ -444,6 +477,21 @@ mod tests {
             .operations
             .iter()
             .any(|operation| operation.from.ends_with("invoice-1006.pdf")));
+    }
+
+    #[test]
+    fn plan_rejects_paths_outside_allowlist() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("inbox");
+        let destination = dir.path().join("outside");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("invoice-1007.pdf"), "invoice").unwrap();
+        let spec = invoice_spec(&source, &destination);
+        let allowlist = PathAllowlist::from_roots([source.clone()]);
+
+        let error = plan(&spec, &allowlist).unwrap_err().to_string();
+        assert!(error.contains("allowlist"), "{error}");
     }
 
     /// Undo tests validate that inverse plans are derived from stored
@@ -466,7 +514,7 @@ mod tests {
             ],
         };
 
-        let undo = plan_undo(&report).unwrap();
+        let undo = plan_undo(&report, &PathAllowlist::unrestricted()).unwrap();
 
         assert_eq!(
             undo.operations,
@@ -494,6 +542,7 @@ mod tests {
         fs::create_dir_all(&inbox).unwrap();
         fs::write(archive.join("invoice-reviewed.pdf"), "invoice").unwrap();
         fs::write(inbox.join("invoice.pdf"), "collision").unwrap();
+        let allowlist = allowlist_for(dir.path());
 
         let undo = ExecutionReport {
             operations: vec![
@@ -510,7 +559,7 @@ mod tests {
             ],
         };
 
-        let error = execute_report(&undo).unwrap_err().to_string();
+        let error = execute_report(&undo, &allowlist).unwrap_err().to_string();
 
         assert!(error.contains("destination already exists"));
         assert!(archive.join("invoice-reviewed.pdf").exists());
@@ -527,7 +576,9 @@ mod tests {
             }],
         };
 
-        let error = plan_undo(&report).unwrap_err().to_string();
+        let error = plan_undo(&report, &PathAllowlist::unrestricted())
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("unsupported operation"));
     }

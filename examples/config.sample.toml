@@ -10,6 +10,10 @@ observe_active_window = false
 # When true, the daemon may execute matching approved automations after a
 # successful dry-run has already been recorded for that automation.
 auto_run_approved_automations = false
+# Empty execution_allowed_roots means automations may only touch paths under
+# observed_folders. Add archive destinations here when they differ.
+execution_allowed_roots = []
+enforce_execution_path_allowlist = true
 redact_clipboard_content = true
 clipboard_store_redacted_preview = false
 clipboard_max_capture_bytes = 256

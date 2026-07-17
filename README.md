@@ -6,7 +6,7 @@
 
 Local-first, terminal-first workflow automation for repeated file workflows.
 
-> Status: `v0.2.0` pre-release. Usable for local evaluation and demos; still evolving.
+> Status: `v0.3.0` pre-release on the road to `1.0.0`. Usable for local evaluation; see [roadmap to 1.0](docs/roadmap-v1.md).
 
 flowd observes local file workflows, detects repeated patterns, and suggests automations you can approve from the terminal.
 
@@ -75,16 +75,18 @@ For more realistic cases, see [Example Workflows](docs/example-workflows.md). To
 
 ### Install from source
 
-The `v0.2` pre-release is currently documented for source installs from this repository. You need a stable Rust toolchain.
+The `v0.3` pre-release is currently documented for source installs from this repository. You need a stable Rust toolchain.
 
 ```bash
 cargo install --path crates/flow-cli
 cargo install --path crates/flow-daemon
+# or:
+./scripts/install.sh
 ```
 
 This installs:
 
-- `flowctl` for setup, inspection, approvals, and execution
+- `flowctl` (and `flow-cli`) for setup, inspection, approvals, and execution
 - `flow-daemon` for local observation and analysis refresh
 
 ### First-run setup
@@ -114,8 +116,13 @@ If the config already exists, `flowctl setup` will leave it unchanged unless you
 The daemon starts workflow observation and, by default, watches `~/Downloads`. It stores state locally in `./flowd.db`.
 
 ```bash
-flow-daemon
+flowctl daemon start
+flowctl daemon status
+# optional user service:
+flowctl daemon install-service
 ```
+
+See [Daemon lifecycle](docs/daemon.md).
 
 `flowd` resolves configuration in this order:
 

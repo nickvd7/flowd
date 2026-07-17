@@ -109,28 +109,37 @@ pub fn approve_suggestion(conn: &mut Connection, suggestion_id: i64) -> Result<i
     Ok(automation_id)
 }
 
-pub fn dry_run_automation(conn: &Connection, automation_id: i64) -> Result<DryRunOutcome> {
+pub fn dry_run_automation(
+    conn: &Connection,
+    automation_id: i64,
+    allowlist: &flow_core::PathAllowlist,
+) -> Result<DryRunOutcome> {
     let spec = load_automation_spec(conn, automation_id)?;
-    let preview = dry_run(&spec).context("failed to preview automation")?;
-    let report = plan(&spec).context("failed to plan automation")?;
+    let preview = dry_run(&spec, allowlist).context("failed to preview automation")?;
+    let report = plan(&spec, allowlist).context("failed to plan automation")?;
     store_run_record(conn, automation_id, "dry_run", &report)?;
     Ok(DryRunOutcome { preview, report })
 }
 
-pub fn execute_automation(conn: &Connection, automation_id: i64) -> Result<ExecutionReport> {
-    execute_automation_with_force(conn, automation_id, false)
+pub fn execute_automation(
+    conn: &Connection,
+    automation_id: i64,
+    allowlist: &flow_core::PathAllowlist,
+) -> Result<ExecutionReport> {
+    execute_automation_with_force(conn, automation_id, false, allowlist)
 }
 
 pub fn execute_automation_for_path(
     conn: &Connection,
     automation_id: i64,
     path: &std::path::Path,
+    allowlist: &flow_core::PathAllowlist,
 ) -> Result<ExecutionReport> {
     let stored = load_stored_automation(conn, automation_id)?;
     ensure_automation_status(automation_id, &stored.status)?;
     let spec = flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")?;
     ensure_dry_run_gate(conn, automation_id, &spec, false)?;
-    let report = match execute_for_path(&spec, path) {
+    let report = match execute_for_path(&spec, path, allowlist) {
         Ok(report) => report,
         Err(error) => {
             set_automation_status(conn, automation_id, AUTOMATION_STATUS_FAILED)
@@ -149,12 +158,13 @@ pub fn execute_automation_with_force(
     conn: &Connection,
     automation_id: i64,
     force: bool,
+    allowlist: &flow_core::PathAllowlist,
 ) -> Result<ExecutionReport> {
     let stored = load_stored_automation(conn, automation_id)?;
     ensure_automation_status(automation_id, &stored.status)?;
     let spec = flow_dsl::parse_spec(&stored.spec_yaml).context("failed to parse automation")?;
     ensure_dry_run_gate(conn, automation_id, &spec, force)?;
-    let report = match execute(&spec) {
+    let report = match execute(&spec, allowlist) {
         Ok(report) => report,
         Err(error) => {
             set_automation_status(conn, automation_id, AUTOMATION_STATUS_FAILED)
@@ -257,12 +267,20 @@ pub fn list_runs(conn: &Connection) -> Result<Vec<StoredAutomationRun>> {
     list_automation_runs(conn).context("failed to read automation runs")
 }
 
-pub fn preview_automation(conn: &Connection, automation_id: i64) -> Result<AutomationPreview> {
+pub fn preview_automation(
+    conn: &Connection,
+    automation_id: i64,
+    allowlist: &flow_core::PathAllowlist,
+) -> Result<AutomationPreview> {
     let spec = load_automation_spec(conn, automation_id)?;
-    Ok(build_preview(&spec, None))
+    Ok(build_preview(&spec, None, allowlist))
 }
 
-pub fn preview_suggestion(conn: &Connection, suggestion_id: i64) -> Result<AutomationPreview> {
+pub fn preview_suggestion(
+    conn: &Connection,
+    suggestion_id: i64,
+    allowlist: &flow_core::PathAllowlist,
+) -> Result<AutomationPreview> {
     let suggestion = get_suggestion(conn, suggestion_id)
         .context("failed to read suggestion")?
         .ok_or_else(|| anyhow!("suggestion {suggestion_id} not found"))?;
@@ -270,7 +288,7 @@ pub fn preview_suggestion(conn: &Connection, suggestion_id: i64) -> Result<Autom
         .context("failed to load example events for suggestion")?;
 
     match compile_automation_spec(&suggestion.proposal_text, &events) {
-        Ok(spec) => Ok(build_preview(&spec, Some(&events))),
+        Ok(spec) => Ok(build_preview(&spec, Some(&events), allowlist)),
         Err(error) => Ok(best_effort_preview_without_spec(
             &events,
             vec![format!("Best-effort preview only: {error}")],
@@ -282,7 +300,11 @@ pub fn preview_suggestion(conn: &Connection, suggestion_id: i64) -> Result<Autom
 /// completed automation run and rebuilds its inverse plan from stored run
 /// metadata. There is no bulk undo path because inspectable, deterministic
 /// single-run reversal is the safety boundary.
-pub fn undo_automation_run(conn: &Connection, run_id: i64) -> Result<UndoOutcome> {
+pub fn undo_automation_run(
+    conn: &Connection,
+    run_id: i64,
+    allowlist: &flow_core::PathAllowlist,
+) -> Result<UndoOutcome> {
     let run = load_automation_run(conn, run_id)
         .context("failed to read automation run")?
         .ok_or_else(|| anyhow!("automation run {run_id} not found"))?;
@@ -299,7 +321,7 @@ pub fn undo_automation_run(conn: &Connection, run_id: i64) -> Result<UndoOutcome
     // pair and then reversing the full operation order. Reversal matters
     // because later filesystem mutations depend on earlier ones, so undo must
     // reestablish intermediate paths before it can restore original names.
-    let undo_plan = match plan_undo(&report) {
+    let undo_plan = match plan_undo(&report, allowlist) {
         Ok(plan) => plan,
         Err(error) => {
             store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
@@ -307,7 +329,7 @@ pub fn undo_automation_run(conn: &Connection, run_id: i64) -> Result<UndoOutcome
         }
     };
 
-    let executed = match execute_report(&undo_plan) {
+    let executed = match execute_report(&undo_plan, allowlist) {
         Ok(report) => report,
         Err(error) => {
             store_failed_undo_run_record(conn, run.automation_id, run.run_id, &error.to_string())?;
@@ -577,11 +599,12 @@ fn compile_automation_spec(summary: &str, events: &[NormalizedEvent]) -> Result<
 fn build_preview(
     spec: &AutomationSpec,
     example_events: Option<&[NormalizedEvent]>,
+    allowlist: &flow_core::PathAllowlist,
 ) -> AutomationPreview {
     let action_summary = action_summary_from_spec(spec);
     let destination_paths_from_spec = destination_paths_from_spec(spec);
 
-    match plan(spec) {
+    match plan(spec, allowlist) {
         Ok(report) => {
             let mut notes = Vec::new();
             let estimated_affected_files = Some(count_affected_files(&report));
@@ -972,7 +995,11 @@ mod tests {
         std::fs::write(inbox.join("invoice-1001.pdf"), "invoice").unwrap();
         std::fs::write(inbox.join("invoice-1002.pdf"), "invoice").unwrap();
 
-        let preview = build_preview(&invoice_spec(&inbox, &archive), None);
+        let preview = build_preview(
+            &invoice_spec(&inbox, &archive),
+            None,
+            &flow_core::PathAllowlist::unrestricted(),
+        );
 
         assert_eq!(preview.estimated_affected_files, Some(2));
         assert!(preview.exact_count);
@@ -1007,6 +1034,7 @@ mod tests {
                     Some("/tmp/inbox/invoice-1001-reviewed.pdf"),
                 ),
             ]),
+            &flow_core::PathAllowlist::unrestricted(),
         );
 
         assert_eq!(preview.estimated_affected_files, None);
@@ -1084,16 +1112,18 @@ mod tests {
         )
         .unwrap();
 
-        let blocked = execute_automation(&conn, automation_id).unwrap_err();
+        let allowlist = flow_core::PathAllowlist::from_roots([dir.path().to_path_buf()]);
+        let blocked = execute_automation(&conn, automation_id, &allowlist).unwrap_err();
         assert!(blocked.to_string().contains("dry-run"));
 
-        dry_run_automation(&conn, automation_id).unwrap();
-        let report = execute_automation(&conn, automation_id).unwrap();
+        dry_run_automation(&conn, automation_id, &allowlist).unwrap();
+        let report = execute_automation(&conn, automation_id, &allowlist).unwrap();
         assert!(!report.operations.is_empty());
 
         // Recreate a matching file so --force can still execute after the first run.
         std::fs::write(inbox.join("invoice-1002.pdf"), "invoice").unwrap();
-        let forced = execute_automation_with_force(&conn, automation_id, true).unwrap();
+        let forced =
+            execute_automation_with_force(&conn, automation_id, true, &allowlist).unwrap();
         assert!(!forced.operations.is_empty());
     }
 

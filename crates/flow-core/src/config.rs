@@ -77,6 +77,11 @@ pub struct Config {
     pub auto_run_debounce_ms: u64,
     pub auto_run_on_browser_downloads: bool,
     pub auto_run_trigger_file_only: bool,
+    /// Extra roots allowed for automation from/to paths. Empty means use
+    /// `observed_folders` as the execution allowlist.
+    pub execution_allowed_roots: Vec<String>,
+    /// When true, dry-run/run/undo refuse paths outside the execution allowlist.
+    pub enforce_execution_path_allowlist: bool,
     pub observe_browser_visits: bool,
     pub browser_visits_bridge_path: String,
     /// Opt-in local LLM labeling (metadata only; never executes actions).
@@ -115,6 +120,8 @@ impl Default for Config {
             auto_run_debounce_ms: 1_500,
             auto_run_on_browser_downloads: false,
             auto_run_trigger_file_only: true,
+            execution_allowed_roots: Vec::new(),
+            enforce_execution_path_allowlist: true,
             observe_browser_visits: false,
             browser_visits_bridge_path: "~/.flowd/browser-visits.ndjson".to_string(),
             local_llm_enabled: false,
